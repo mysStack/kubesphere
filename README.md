@@ -148,7 +148,7 @@ helm upgrade --install -n kubesphere-system --create-namespace ks-core oci://doc
 --set controller.image.repository=mingys/ks-controller-manager \
 --set controller.image.tag=v4.1.3-token-fix \
 --set ksExtensionRepository.image.repository=mingys/ks-extensions-museum \
---set ksExtensionRepository.image.tag=v1.1.6 \
+--set ksExtensionRepository.image.tag=v1.1.6
 ```
 
 ### KubeSphere for hosted Kubernetes services
