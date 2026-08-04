@@ -136,6 +136,7 @@ helm upgrade --install -n kubesphere-system --create-namespace ks-core oci://doc
 --set console.image.repository=mingys/ks-console \
 --set controller.image.repository=mingys/ks-controller-manager \
 --set controller.image.tag=v4.1.3-token-fix \
+--set telemetry.enabled=false \
 --set ksExtensionRepository.image.repository=mingys/ks-extensions-museum \
 --set ksExtensionRepository.image.tag=v1.1.6
 ```
