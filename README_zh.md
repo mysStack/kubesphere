@@ -131,7 +131,7 @@ KubeSphere 支持在任意平台运行，从本地数据中心到混合多云再
 运行以下命令以在现有 Kubernetes 集群上安装 KubeSphere：
 
 ```bash
-helm upgrade --install -n kubesphere-system --create-namespace ks-core oci://docker.io/mingys/ks-core --version 1.1.5-fix.1 --debug --wait \
+helm upgrade --install -n kubesphere-system --create-namespace ks-core oci://docker.mystack.dpdns.org/mingys/ks-core --version 1.1.5-fix.1 --debug --wait \
 --set apiserver.image.repository=mingys/ks-apiserver \
 --set console.image.repository=mingys/ks-console \
 --set controller.image.repository=mingys/ks-controller-manager \

@@ -142,7 +142,7 @@ optionally [install additional extensions after installation](https://kubesphere
 Run the following commands to install KubeSphere on an existing Kubernetes cluster:
 
 ```bash
-helm upgrade --install -n kubesphere-system --create-namespace ks-core oci://docker.io/mingys/ks-core --version 1.1.5-fix.1 --debug --wait \
+helm upgrade --install -n kubesphere-system --create-namespace ks-core oci://docker.mystack.dpdns.org/mingys/ks-core --version 1.1.5-fix.1 --debug --wait \
 --set apiserver.image.repository=mingys/ks-apiserver \
 --set console.image.repository=mingys/ks-console \
 --set controller.image.repository=mingys/ks-controller-manager \
