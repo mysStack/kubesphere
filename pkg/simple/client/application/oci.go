@@ -117,10 +117,16 @@ func GetRepoChartsFromOci(parsedURL *url.URL, cred appv2.RepoCredential) ([]stri
 		skipTLS = false
 	}
 
-	reg, err := oci.NewRegistry(parsedURL.Host,
-		oci.WithTimeout(5*time.Second),
+	options := []oci.RegistryOption{
+		oci.WithTimeout(5 * time.Second),
 		oci.WithBasicAuth(cred.Username, cred.Password),
-		oci.WithInsecureSkipVerifyTLS(skipTLS))
+		oci.WithInsecureSkipVerifyTLS(skipTLS),
+	}
+	if cred.PlainHTTP {
+		options = append(options, oci.WithPlainHTTP())
+	}
+
+	reg, err := oci.NewRegistry(parsedURL.Host, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -129,12 +135,34 @@ func GetRepoChartsFromOci(parsedURL *url.URL, cred appv2.RepoCredential) ([]stri
 
 	repoPath := strings.TrimSuffix(parsedURL.Path, "/")
 	repoPath = strings.TrimPrefix(repoPath, "/")
+	if repoPath != "" {
+		repo, err := reg.Repository(ctx, repoPath)
+		if err == nil {
+			var tags []string
+			err = repo.Tags(ctx, func(ts []string) error {
+				tags = append(tags, ts...)
+				return nil
+			})
+			if err == nil {
+				if len(tags) == 0 {
+					return nil, nil
+				}
+				return []string{repoPath}, nil
+			}
+			if !isOCIRepositoryNotFound(err) {
+				return nil, err
+			}
+		}
+	}
+
 	var repoCharts []string
 	err = reg.Repositories(ctx, "", func(repos []string) error {
-		cutPrefix := repoPath
-		if cutPrefix != "" {
-			cutPrefix = cutPrefix + "/"
+		if repoPath == "" {
+			repoCharts = append(repoCharts, repos...)
+			return nil
 		}
+
+		cutPrefix := repoPath + "/"
 		for _, repo := range repos {
 			if subRepo, found := strings.CutPrefix(repo, cutPrefix); found && subRepo != "" {
 				if !strings.Contains(subRepo, "/") {
@@ -152,6 +180,17 @@ func GetRepoChartsFromOci(parsedURL *url.URL, cred appv2.RepoCredential) ([]stri
 	return repoCharts, nil
 }
 
+func isOCIRepositoryNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errMsg := strings.ToLower(err.Error())
+	return strings.Contains(errMsg, "not found") ||
+		strings.Contains(errMsg, "name unknown") ||
+		strings.Contains(errMsg, "repository name not known")
+}
+
 func newOCIRegistryClient(u string, cred appv2.RepoCredential) (*registry.Client, error) {
 	parsedURL, err := url.Parse(u)
 	if err != nil {
@@ -164,10 +203,16 @@ func newOCIRegistryClient(u string, cred appv2.RepoCredential) (*registry.Client
 		skipTLS = false
 	}
 
-	reg, err := oci.NewRegistry(parsedURL.Host,
-		oci.WithTimeout(5*time.Second),
+	options := []oci.RegistryOption{
+		oci.WithTimeout(5 * time.Second),
 		oci.WithBasicAuth(cred.Username, cred.Password),
-		oci.WithInsecureSkipVerifyTLS(skipTLS))
+		oci.WithInsecureSkipVerifyTLS(skipTLS),
+	}
+	if cred.PlainHTTP {
+		options = append(options, oci.WithPlainHTTP())
+	}
+
+	reg, err := oci.NewRegistry(parsedURL.Host, options...)
 	if err != nil {
 		return nil, err
 	}

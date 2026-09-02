@@ -64,7 +64,8 @@ func TestRegistry_Api(t *testing.T) {
 	reg, err := NewRegistry(uri.Host,
 		WithTimeout(5*time.Second),
 		WithBasicAuth("", ""),
-		WithInsecureSkipVerifyTLS(true))
+		WithInsecureSkipVerifyTLS(true),
+		WithPlainHTTP())
 	if err != nil {
 		t.Fatalf("NewRegistry() error = %v", err)
 	}
@@ -99,4 +100,24 @@ func TestRegistry_Api(t *testing.T) {
 		t.Fatalf("Registry.Repositories() error = %v", err)
 	}
 
+}
+
+func TestNewRegistryDefaultsToHTTPSWithoutProbe(t *testing.T) {
+	reg, err := NewRegistry("example.com")
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	if reg.PlainHTTP {
+		t.Fatal("expected PlainHTTP to be false by default")
+	}
+}
+
+func TestNewRegistryWithPlainHTTPSkipsProbe(t *testing.T) {
+	reg, err := NewRegistry("example.com", WithPlainHTTP())
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	if !reg.PlainHTTP {
+		t.Fatal("expected PlainHTTP to be true")
+	}
 }

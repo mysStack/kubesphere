@@ -58,7 +58,7 @@ func NewRegistry(name string, options ...RegistryOption) (*Registry, error) {
 	reg.Client = &auth.Client{
 		Client: &http.Client{
 			Timeout:   reg.timeout,
-			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: reg.insecureSkipVerifyTLS}},
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: reg.insecureSkipVerifyTLS}, Proxy: http.ProxyFromEnvironment},
 		},
 		Header: headers,
 		Credential: func(_ context.Context, _ string) (auth.Credential, error) {
@@ -71,11 +71,6 @@ func NewRegistry(name string, options ...RegistryOption) (*Registry, error) {
 				Password: reg.password,
 			}, nil
 		},
-	}
-
-	_, err := reg.IsPlainHttp()
-	if err != nil {
-		return nil, err
 	}
 
 	return reg, nil
@@ -97,6 +92,12 @@ func WithTimeout(timeout time.Duration) RegistryOption {
 func WithInsecureSkipVerifyTLS(insecureSkipVerifyTLS bool) RegistryOption {
 	return func(reg *Registry) {
 		reg.insecureSkipVerifyTLS = insecureSkipVerifyTLS
+	}
+}
+
+func WithPlainHTTP() RegistryOption {
+	return func(reg *Registry) {
+		reg.PlainHTTP = true
 	}
 }
 
