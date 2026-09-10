@@ -12,11 +12,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"time"
 
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/pkg/registry"
 	"oras.land/oras-go/pkg/registry/remote"
 	"oras.land/oras-go/pkg/registry/remote/auth"
@@ -213,6 +216,65 @@ func (r *Registry) Repository(ctx context.Context, name string) (registry.Reposi
 	repo := r.repository((*remote.Repository)(&r.RepositoryOptions))
 	repo.Reference = ref
 	return repo, nil
+}
+
+// FetchManifest returns the OCI manifest for a tag without downloading its layers.
+func (r *Registry) FetchManifest(ctx context.Context, repository, tag string) (ocispec.Manifest, error) {
+	var manifest ocispec.Manifest
+	ref := registry.Reference{Registry: r.Reference.Registry, Repository: repository, Reference: tag}
+	if err := ref.ValidateReference(); err != nil {
+		return manifest, err
+	}
+
+	u := url.URL{
+		Scheme: buildScheme(r.PlainHTTP),
+		Host:   r.Reference.Host(),
+		Path:   fmt.Sprintf("/v2/%s/manifests/%s", repository, tag),
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return manifest, err
+	}
+	req.Header.Set("Accept", ocispec.MediaTypeImageManifest)
+	resp, err := r.do(req)
+	if err != nil {
+		return manifest, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return manifest, ParseErrorResponse(resp)
+	}
+	if err := json.NewDecoder(limitReader(resp.Body, r.MaxMetadataBytes)).Decode(&manifest); err != nil {
+		return manifest, err
+	}
+	return manifest, nil
+}
+
+// FetchBlob downloads a single blob referenced by an OCI manifest.
+func (r *Registry) FetchBlob(ctx context.Context, repository string, desc ocispec.Descriptor) ([]byte, error) {
+	ref := registry.Reference{Registry: r.Reference.Registry, Repository: repository}
+	if err := ref.ValidateRepository(); err != nil {
+		return nil, err
+	}
+
+	u := url.URL{
+		Scheme: buildScheme(r.PlainHTTP),
+		Host:   r.Reference.Host(),
+		Path:   fmt.Sprintf("/v2/%s/blobs/%s", repository, desc.Digest),
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := r.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, ParseErrorResponse(resp)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 func (r *Registry) repository(repo *remote.Repository) *remote.Repository {

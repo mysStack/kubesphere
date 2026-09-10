@@ -359,7 +359,10 @@ func LoadRepoIndex(u string, cred appv2.RepoCredential) (idx helmrepo.IndexFile,
 	if registry.IsOCI(u) {
 		return LoadRepoIndexFromOci(u, cred)
 	}
+	return LoadRepoIndexFromHTTP(u, cred)
+}
 
+func LoadRepoIndexFromHTTP(u string, cred appv2.RepoCredential) (idx helmrepo.IndexFile, err error) {
 	if !strings.HasSuffix(u, "/") {
 		u = fmt.Sprintf("%s/index.yaml", u)
 	} else {

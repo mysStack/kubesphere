@@ -58,6 +58,40 @@ func TestCreateRepoDoesNotValidateIndex(t *testing.T) {
 	}
 }
 
+func TestCreateHTTPRepoValidatesIndex(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	h := &appHandler{client: fake.NewClientBuilder().WithScheme(scheme).Build()}
+	ws := new(restful.WebService)
+	ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+	ws.Route(ws.POST("/repos").To(h.CreateOrUpdateRepo))
+	container := restful.NewContainer()
+	container.Add(ws)
+
+	body, err := json.Marshal(&appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "unreachable-http-repo"},
+		Spec:       appv2.RepoSpec{Url: "http://127.0.0.1:1/charts"},
+	})
+	if err != nil {
+		t.Fatalf("marshal repo: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/repos", bytes.NewReader(body))
+	req.Header.Set("Content-Type", restful.MIME_JSON)
+	container.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("create repo status = %d, want %d: %s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
+	}
+
+	repo := &appv2.Repo{}
+	err = h.client.Get(context.Background(), runtimeclient.ObjectKey{Name: "unreachable-http-repo"}, repo)
+	if err == nil {
+		t.Fatal("HTTP repository was persisted without a successful index validation")
+	}
+}
+
 func TestLoadRepoCredentialSecret(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {

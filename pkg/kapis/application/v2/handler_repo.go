@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/url"
 
+	"helm.sh/helm/v3/pkg/registry"
 	k8suitl "kubesphere.io/kubesphere/pkg/utils/k8sutil"
 
 	"kubesphere.io/kubesphere/pkg/simple/client/application"
@@ -68,6 +69,15 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 		data := map[string]any{"ok": true}
 		resp.WriteAsJson(data)
 		return
+	}
+	if !registry.IsOCI(repoRequest.Spec.Url) {
+		credential := repoRequest.Spec.Credential
+		if err = h.loadRepoCredentialSecret(req.Request.Context(), repoRequest.Spec.CredentialSecretRef, &credential); requestDone(err, resp) {
+			return
+		}
+		if _, err = application.LoadRepoIndexFromHTTP(repoRequest.Spec.Url, credential); requestDone(err, resp) {
+			return
+		}
 	}
 
 	repo := &appv2.Repo{}
