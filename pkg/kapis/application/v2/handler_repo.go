@@ -57,17 +57,14 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 		repoRequest.Spec.Credential.Password, _ = parsedUrl.User.Password()
 	}
 
-	credential := repoRequest.Spec.Credential
-	if err = h.loadRepoCredentialSecret(req.Request.Context(), repoRequest.Spec.CredentialSecretRef, &credential); requestDone(err, resp) {
-		return
-	}
-
-	_, err = application.LoadRepoIndex(repoRequest.Spec.Url, credential)
-	if requestDone(err, resp) {
-		return
-	}
-
 	if req.QueryParameter("validate") != "" {
+		credential := repoRequest.Spec.Credential
+		if err = h.loadRepoCredentialSecret(req.Request.Context(), repoRequest.Spec.CredentialSecretRef, &credential); requestDone(err, resp) {
+			return
+		}
+		if _, err = application.LoadRepoIndex(repoRequest.Spec.Url, credential); requestDone(err, resp) {
+			return
+		}
 		data := map[string]any{"ok": true}
 		resp.WriteAsJson(data)
 		return
