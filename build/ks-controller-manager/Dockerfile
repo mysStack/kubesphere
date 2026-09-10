@@ -1,13 +1,17 @@
-FROM golang:1.24.3 AS build_context
+FROM --platform=$BUILDPLATFORM golang:1.24.3 AS build_context
 
 ARG TELEMETRY_VERSION=1.0.2
+ARG TARGETOS
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y rsync
 WORKDIR /workspace
 ADD . /workspace/
 
-RUN make ks-controller-manager
+RUN KUBE_BUILD_PLATFORMS="${TARGETOS}/${TARGETARCH}" make ks-controller-manager && \
+    mkdir -p /workspace/_output/bin && \
+    cp "/workspace/_output/local/bin/${TARGETOS}/${TARGETARCH}/ks-controller-manager" \
+       /workspace/_output/bin/ks-controller-manager
 # RUN curl -LO https://github.com/kubesphere/telemetry/releases/download/v${TELEMETRY_VERSION}/telemetry_${TELEMETRY_VERSION}_linux_${TARGETARCH}.tar.gz && \
 #     tar -zxvf telemetry_${TELEMETRY_VERSION}_linux_${TARGETARCH}.tar.gz -C /workspace/_output/bin telemetry
 
