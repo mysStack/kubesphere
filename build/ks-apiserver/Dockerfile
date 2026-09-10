@@ -10,8 +10,8 @@ ADD . /workspace/
 
 RUN KUBE_BUILD_PLATFORMS="${TARGETOS}/${TARGETARCH}" make ks-apiserver && \
     mkdir -p /workspace/_output/bin && \
-    cp "/workspace/_output/local/bin/${TARGETOS}/${TARGETARCH}/ks-apiserver" \
-       /workspace/_output/bin/ks-apiserver
+    target="/workspace/_output/local/bin/${TARGETOS}/${TARGETARCH}/ks-apiserver" && \
+    if [ "$target" -ef /workspace/_output/bin/ks-apiserver ]; then :; else cp "$target" /workspace/_output/bin/ks-apiserver; fi
 
 FROM alpine:3.21.3
 
