@@ -21,6 +21,8 @@ import (
 	"kubesphere.io/kubesphere/pkg/simple/client/oci"
 )
 
+const ociRequestTimeout = 30 * time.Second
+
 func HelmPullFromOci(u string, cred appv2.RepoCredential) ([]byte, error) {
 	if !registry.IsOCI(u) {
 		return nil, fmt.Errorf("invalid oci URL format: %s", u)
@@ -173,7 +175,7 @@ func GetRepoChartsFromOci(parsedURL *url.URL, cred appv2.RepoCredential) ([]stri
 	}
 
 	options := []oci.RegistryOption{
-		oci.WithTimeout(5 * time.Second),
+		oci.WithTimeout(ociRequestTimeout),
 		oci.WithBasicAuth(cred.Username, cred.Password),
 		oci.WithInsecureSkipVerifyTLS(skipTLS),
 	}
@@ -306,7 +308,7 @@ func newOCIRegistry(u string, cred appv2.RepoCredential) (*oci.Registry, error) 
 	}
 
 	options := []oci.RegistryOption{
-		oci.WithTimeout(5 * time.Second),
+		oci.WithTimeout(ociRequestTimeout),
 		oci.WithBasicAuth(cred.Username, cred.Password),
 		oci.WithInsecureSkipVerifyTLS(skipTLS),
 	}
