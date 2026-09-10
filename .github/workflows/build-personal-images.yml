@@ -6,10 +6,14 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: Git branch, tag, or commit SHA to build
+        required: true
+        default: master
+        type: string
       tag:
         description: Image tag to publish
         required: true
-        default: latest
         type: string
 
 permissions:
@@ -25,6 +29,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
