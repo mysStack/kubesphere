@@ -10,8 +10,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"strconv"
-	"strings"
 
 	k8suitl "kubesphere.io/kubesphere/pkg/utils/k8sutil"
 
@@ -117,72 +115,7 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 }
 
 func (h *appHandler) loadRepoCredentialSecret(ctx context.Context, ref *v1.SecretReference, credential *appv2.RepoCredential) error {
-	if ref == nil {
-		return nil
-	}
-	if ref.Name == "" {
-		return fmt.Errorf("credentialSecretRef.name is required")
-	}
-
-	namespace := ref.Namespace
-	if namespace == "" {
-		namespace = constants.KubeSphereNamespace
-	}
-
-	secret := &v1.Secret{}
-	if err := h.client.Get(ctx, runtimeclient.ObjectKey{Namespace: namespace, Name: ref.Name}, secret); err != nil {
-		return err
-	}
-
-	setStringFromSecret(secret, "username", &credential.Username)
-	setStringFromSecret(secret, "password", &credential.Password)
-	setStringFromSecret(secret, "certFile", &credential.CertFile)
-	setStringFromSecret(secret, "keyFile", &credential.KeyFile)
-	setStringFromSecret(secret, "caFile", &credential.CAFile)
-	if err := setBoolPtrFromSecret(secret, "insecureSkipTLSVerify", &credential.InsecureSkipTLSVerify); err != nil {
-		return err
-	}
-	if err := setBoolFromSecret(secret, "plainHTTP", &credential.PlainHTTP); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func setStringFromSecret(secret *v1.Secret, key string, dst *string) {
-	if value, ok := secret.Data[key]; ok {
-		*dst = string(value)
-	}
-}
-
-func setBoolPtrFromSecret(secret *v1.Secret, key string, dst **bool) error {
-	if value, ok := secret.Data[key]; ok {
-		parsed, err := parseSecretBool(key, value)
-		if err != nil {
-			return err
-		}
-		*dst = &parsed
-	}
-	return nil
-}
-
-func setBoolFromSecret(secret *v1.Secret, key string, dst *bool) error {
-	if value, ok := secret.Data[key]; ok {
-		parsed, err := parseSecretBool(key, value)
-		if err != nil {
-			return err
-		}
-		*dst = parsed
-	}
-	return nil
-}
-
-func parseSecretBool(key string, value []byte) (bool, error) {
-	parsed, err := strconv.ParseBool(strings.TrimSpace(string(value)))
-	if err != nil {
-		return false, fmt.Errorf("invalid boolean value for secret key %q: %w", key, err)
-	}
-	return parsed, nil
+	return application.LoadRepoCredentialSecret(ctx, h.client, ref, credential)
 }
 
 func (h *appHandler) DeleteRepo(req *restful.Request, resp *restful.Response) {

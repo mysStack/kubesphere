@@ -113,6 +113,14 @@ func (r *RepoReconciler) UpdateStatus(ctx context.Context, helmRepo *appv2.Repo)
 	return nil
 }
 
+func (r *RepoReconciler) failRepoSync(ctx context.Context, helmRepo *appv2.Repo, syncErr error) error {
+	helmRepo.Status.State = appv2.StatusFailed
+	if err := r.UpdateStatus(ctx, helmRepo); err != nil {
+		return fmt.Errorf("%w; update failed repo status: %v", syncErr, err)
+	}
+	return syncErr
+}
+
 func (r *RepoReconciler) skipSync(helmRepo *appv2.Repo) (bool, error) {
 	logger := r.logger.WithValues("repo", helmRepo.Name)
 	if helmRepo.Status.State == appv2.StatusManualTrigger || helmRepo.Status.State == appv2.StatusSyncing {
@@ -204,10 +212,15 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		return reconcile.Result{}, err
 	}
 
-	index, err := application.LoadRepoIndex(helmRepo.Spec.Url, helmRepo.Spec.Credential)
+	credential := helmRepo.Spec.Credential
+	if err := application.LoadRepoCredentialSecret(ctx, r.Client, helmRepo.Spec.CredentialSecretRef, &credential); err != nil {
+		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+	}
+
+	index, err := application.LoadRepoIndex(helmRepo.Spec.Url, credential)
 	if err != nil {
 		logger.Error(err, "load index failed", "url", helmRepo.Spec.Url)
-		return reconcile.Result{}, err
+		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 	}
 
 	appList := &appv2.ApplicationList{}
@@ -217,7 +230,7 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	err = r.Client.List(ctx, appList, &opts)
 	if err != nil {
 		logger.Error(err, "list application failed")
-		return reconcile.Result{}, err
+		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 	}
 	indexMap := make(map[string]struct{})
 	for appName := range index.Entries {
@@ -231,7 +244,7 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 			err = r.Client.Delete(ctx, &i)
 			if err != nil {
 				logger.Error(err, "delete application failed", "application", i.Name)
-				return reconcile.Result{}, err
+				return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 			}
 		}
 	}
@@ -247,7 +260,7 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		vRequests, err := r.repoParseRequest(ctx, versions, helmRepo, appName, appList)
 		if err != nil {
 			logger.Error(err, "parse request failed")
-			return reconcile.Result{}, err
+			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 		}
 		if len(vRequests) == 0 {
 			continue
@@ -263,7 +276,7 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		}
 		if err = application.CreateOrUpdateApp(r.Client, vRequests, r.cmStore, r.ossStore, own); err != nil {
 			logger.Error(err, "create or update app failed")
-			return reconcile.Result{}, err
+			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 		}
 	}
 
