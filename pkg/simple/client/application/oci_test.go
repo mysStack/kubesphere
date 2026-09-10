@@ -7,12 +7,14 @@
 package application
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -57,6 +59,27 @@ func TestGetRepoChartsFromOciWithCatalog(t *testing.T) {
 	}
 	if len(repos) != len(testRepos) {
 		t.Fatalf("expected %d repos, got %d", len(testRepos), len(repos))
+	}
+}
+
+func TestOCIRegistryAllowsSlowRegistryResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/" && r.URL.Path != "/v2" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		time.Sleep(6 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	registry, err := newOCIRegistry("oci://"+server.Listener.Addr().String(), appv2.RepoCredential{PlainHTTP: true})
+	if err != nil {
+		t.Fatalf("newOCIRegistry() error = %v", err)
+	}
+	if err := registry.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping() error = %v", err)
 	}
 }
 
