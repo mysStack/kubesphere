@@ -24,6 +24,7 @@ import (
 	"k8s.io/klog/v2"
 	appv2 "kubesphere.io/api/application/v2"
 
+	"kubesphere.io/kubesphere/pkg/constants"
 	"kubesphere.io/kubesphere/pkg/simple/client/oci"
 )
 
@@ -54,7 +55,85 @@ func HelmPullFromOci(u string, cred appv2.RepoCredential) ([]byte, error) {
 	return pullResult.Chart.Data, nil
 }
 
+// OCIChartVersionCache maps an OCI tag to a previously synchronized chart version.
+type OCIChartVersionCache map[string]*helmrepo.ChartVersion
+
+// BuildOCIChartVersionCache rebuilds OCI tag metadata from synchronized application versions.
+func BuildOCIChartVersionCache(apps []appv2.Application, versions []appv2.ApplicationVersion) OCIChartVersionCache {
+	appMetadata := make(map[string]*chart.Metadata, len(apps))
+	for i := range apps {
+		app := &apps[i]
+		name := app.Annotations[appv2.AppOriginalNameLabelKey]
+		if name == "" {
+			continue
+		}
+		appMetadata[app.Name] = &chart.Metadata{
+			Name:        name,
+			Home:        app.Spec.AppHome,
+			Icon:        app.Spec.Icon,
+			Description: app.Annotations[constants.DescriptionAnnotationKey],
+		}
+	}
+
+	cache := make(OCIChartVersionCache)
+	for i := range versions {
+		version := &versions[i]
+		metadata, found := appMetadata[version.Labels[appv2.AppIDLabelKey]]
+		if !found {
+			continue
+		}
+		host, repository, tag, found := ociReferenceFromPullURL(version.Spec.PullUrl)
+		if !found {
+			continue
+		}
+		cachedMetadata := *metadata
+		cachedMetadata.Version = version.Spec.VersionName
+		cachedMetadata.Home = version.Spec.AppHome
+		cachedMetadata.Icon = version.Spec.Icon
+		if description := version.Annotations[constants.DescriptionAnnotationKey]; description != "" {
+			cachedMetadata.Description = description
+		}
+		cachedMetadata.Maintainers = chartMaintainers(version.Spec.Maintainer)
+		cache[ociCacheKey(host, repository, tag)] = &helmrepo.ChartVersion{
+			Metadata: &cachedMetadata,
+			URLs:     []string{version.Spec.PullUrl},
+			Digest:   version.Spec.Digest,
+			Created:  version.CreationTimestamp.Time,
+		}
+	}
+	return cache
+}
+
+func ociReferenceFromPullURL(pullURL string) (host, repository, tag string, found bool) {
+	u, err := url.Parse(pullURL)
+	if err != nil || !registry.IsOCI(pullURL) {
+		return "", "", "", false
+	}
+	reference := strings.TrimPrefix(u.Path, "/")
+	separator := strings.LastIndex(reference, ":")
+	if u.Host == "" || separator <= 0 || separator == len(reference)-1 {
+		return "", "", "", false
+	}
+	return u.Host, reference[:separator], reference[separator+1:], true
+}
+
+func ociCacheKey(host, repository, tag string) string {
+	return host + "/" + repository + ":" + tag
+}
+
+func chartMaintainers(maintainers []appv2.Maintainer) []*chart.Maintainer {
+	result := make([]*chart.Maintainer, 0, len(maintainers))
+	for _, maintainer := range maintainers {
+		result = append(result, &chart.Maintainer{Name: maintainer.Name, Email: maintainer.Email, URL: maintainer.URL})
+	}
+	return result
+}
+
 func LoadRepoIndexFromOci(u string, cred appv2.RepoCredential) (idx helmrepo.IndexFile, err error) {
+	return LoadRepoIndexFromOciWithCache(u, cred, nil)
+}
+
+func LoadRepoIndexFromOciWithCache(u string, cred appv2.RepoCredential, cached OCIChartVersionCache) (idx helmrepo.IndexFile, err error) {
 	if !registry.IsOCI(u) {
 		return idx, fmt.Errorf("invalid oci URL format: %s", u)
 	}
@@ -92,6 +171,10 @@ func LoadRepoIndexFromOci(u string, cred appv2.RepoCredential) (idx helmrepo.Ind
 
 		for _, tag := range tags {
 			if isAuxiliaryOCITag(tag) {
+				continue
+			}
+			if cachedVersion, found := cached[ociCacheKey(parsedURL.Host, repoChart, tag)]; found && cachedVersion.Metadata != nil {
+				index.Entries[cachedVersion.Name] = append(index.Entries[cachedVersion.Name], cachedVersion)
 				continue
 			}
 

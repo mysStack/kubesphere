@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"helm.sh/helm/v3/pkg/registry"
 	helmrepo "helm.sh/helm/v3/pkg/repo"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -217,12 +218,6 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 	}
 
-	index, err := application.LoadRepoIndex(helmRepo.Spec.Url, credential)
-	if err != nil {
-		logger.Error(err, "load index failed", "url", helmRepo.Spec.Url)
-		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
-	}
-
 	appList := &appv2.ApplicationList{}
 	opts := client.ListOptions{
 		LabelSelector: labels.SelectorFromSet(labels.Set{appv2.RepoIDLabelKey: helmRepo.Name}),
@@ -230,6 +225,23 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	err = r.Client.List(ctx, appList, &opts)
 	if err != nil {
 		logger.Error(err, "list application failed")
+		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+	}
+
+	var index helmrepo.IndexFile
+	if registry.IsOCI(helmRepo.Spec.Url) {
+		appVersionList := &appv2.ApplicationVersionList{}
+		if err := r.Client.List(ctx, appVersionList, &opts); err != nil {
+			logger.Error(err, "list application version failed")
+			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+		}
+		cached := application.BuildOCIChartVersionCache(appList.Items, appVersionList.Items)
+		index, err = application.LoadRepoIndexFromOciWithCache(helmRepo.Spec.Url, credential, cached)
+	} else {
+		index, err = application.LoadRepoIndex(helmRepo.Spec.Url, credential)
+	}
+	if err != nil {
+		logger.Error(err, "load index failed", "url", helmRepo.Spec.Url)
 		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 	}
 	indexMap := make(map[string]struct{})

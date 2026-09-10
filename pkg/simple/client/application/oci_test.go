@@ -20,7 +20,9 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/registry"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	appv2 "kubesphere.io/api/application/v2"
+	"kubesphere.io/kubesphere/pkg/constants"
 )
 
 func TestGetRepoChartsFromOciWithCatalog(t *testing.T) {
@@ -275,5 +277,77 @@ func TestLoadRepoIndexFromOciSkipsAuxiliaryArtifacts(t *testing.T) {
 	}
 	if chartBlobRequests != 0 {
 		t.Fatalf("chart package was downloaded %d times, want 0", chartBlobRequests)
+	}
+}
+
+func TestLoadRepoIndexFromOciReusesCachedChartTag(t *testing.T) {
+	const repo = "charts/demo"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/", "/v2":
+			w.WriteHeader(http.StatusOK)
+		case "/v2/" + repo + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0"}})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	cached := OCIChartVersionCache{
+		ociCacheKey(server.Listener.Addr().String(), repo, "1.0.0"): {
+			Metadata: &chart.Metadata{APIVersion: "v2", Name: "demo", Version: "1.0.0"},
+			Digest:   "cached-digest",
+			URLs:     []string{fmt.Sprintf("oci://%s/%s:1.0.0", server.Listener.Addr(), repo)},
+		},
+	}
+	index, err := LoadRepoIndexFromOciWithCache(fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repo), appv2.RepoCredential{PlainHTTP: true}, cached)
+	if err != nil {
+		t.Fatalf("LoadRepoIndexFromOciWithCache() error = %v", err)
+	}
+	versions := index.Entries["demo"]
+	if len(versions) != 1 || versions[0].Digest != "cached-digest" {
+		t.Fatalf("cached chart entry = %#v, want cached version", versions)
+	}
+}
+
+func TestBuildOCIChartVersionCacheUsesApplicationVersions(t *testing.T) {
+	apps := []appv2.Application{{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "repo-demo",
+			Annotations: map[string]string{
+				appv2.AppOriginalNameLabelKey:      "demo",
+				constants.DescriptionAnnotationKey: "cached chart",
+			},
+		},
+		Spec: appv2.ApplicationSpec{
+			AppHome: "https://application.example",
+			Icon:    "application-icon",
+		},
+	}}
+	versions := []appv2.ApplicationVersion{{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{appv2.AppIDLabelKey: "repo-demo"},
+			Annotations: map[string]string{
+				constants.DescriptionAnnotationKey: "version description",
+			},
+		},
+		Spec: appv2.ApplicationVersionSpec{
+			VersionName: "1.0.0",
+			Digest:      "cached-digest",
+			PullUrl:     "oci://registry.example/charts/demo:1.0.0",
+			AppHome:     "https://version.example",
+			Icon:        "version-icon",
+		},
+	}}
+
+	cache := BuildOCIChartVersionCache(apps, versions)
+	entry, found := cache[ociCacheKey("registry.example", "charts/demo", "1.0.0")]
+	if !found {
+		t.Fatal("cached OCI tag not found")
+	}
+	if entry.Name != "demo" || entry.Version != "1.0.0" || entry.Digest != "cached-digest" || entry.Description != "version description" || entry.Home != "https://version.example" || entry.Icon != "version-icon" {
+		t.Fatalf("cached chart entry = %#v", entry)
 	}
 }
