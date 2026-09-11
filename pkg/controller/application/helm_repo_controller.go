@@ -229,14 +229,22 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	}
 
 	var index helmrepo.IndexFile
+	var indexWarnings []error
 	if registry.IsOCI(helmRepo.Spec.Url) {
-		index, err = application.LoadRepoIndexFromOciTags(helmRepo.Spec.Url, credential)
+		index, indexWarnings, err = application.LoadOCIRepoIndex(ctx, helmRepo.Spec.Url, credential)
+		if err == nil && len(index.Entries) == 0 {
+			err = fmt.Errorf("no valid OCI Helm charts found at %s", helmRepo.Spec.Url)
+		}
 	} else {
 		index, err = application.LoadRepoIndex(helmRepo.Spec.Url, credential)
 	}
 	if err != nil {
 		logger.Error(err, "load index failed", "url", helmRepo.Spec.Url)
 		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+	}
+	for _, warning := range indexWarnings {
+		logger.Info("skipped OCI artifact during repository sync", "warning", warning)
+		r.recorder.Eventf(helmRepo, corev1.EventTypeWarning, "OCIIndexWarning", "%v", warning)
 	}
 	indexMap := make(map[string]struct{})
 	for appName := range index.Entries {
@@ -252,6 +260,22 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 				logger.Error(err, "delete application failed", "application", i.Name)
 				return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 			}
+		}
+	}
+	appVersionList := &appv2.ApplicationVersionList{}
+	if err = r.Client.List(ctx, appVersionList, &opts); err != nil {
+		logger.Error(err, "list application versions failed")
+		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+	}
+	for _, version := range appVersionList.Items {
+		appID := version.Labels[appv2.AppIDLabelKey]
+		if _, exists := indexMap[appID]; exists {
+			continue
+		}
+		logger.V(4).Info("application version has been removed from the repo", "application version", version.Name)
+		if err = r.Client.Delete(ctx, &version); err != nil {
+			logger.Error(err, "delete application version failed", "application version", version.Name)
+			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 		}
 	}
 
