@@ -412,7 +412,7 @@ func TestLoadOCIRepoIndexSkipsAuxiliaryAndInvalidTagsBeforeManifestRequests(t *t
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/" + repository + "/tags/list":
-			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.0.0-metadata", "latest"}})
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.0.0-metadata", "1.2", "latest"}})
 		case "/v2/" + repository + "/manifests/1.0.0":
 			manifestRequests["1.0.0"]++
 			w.Header().Set("Docker-Content-Digest", "sha256:good-manifest")

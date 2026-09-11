@@ -127,7 +127,7 @@ func LoadOCIRepoIndex(ctx context.Context, u string, cred appv2.RepoCredential) 
 				continue
 			}
 			version := strings.ReplaceAll(tag, "_", "+")
-			if _, err := semver.NewVersion(version); err != nil {
+			if _, err := semver.StrictNewVersion(version); err != nil {
 				continue
 			}
 			chartVersion, err := inspectOCIChart(ctx, ociRegistry, repoChart, tag)
