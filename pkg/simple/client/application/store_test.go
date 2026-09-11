@@ -63,3 +63,63 @@ func TestDownLoadChartUsesRepoCredentialSecret(t *testing.T) {
 		t.Fatal("OCI chart download did not use credentialSecretRef")
 	}
 }
+
+func TestFailOverGetKeepsOriginalOCITag(t *testing.T) {
+	const username = "repo-user"
+	const password = "repo-password"
+	const tag = "1.1.0_build.1"
+	usedSecretCredential := false
+	usedOriginalTag := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUsername, gotPassword, ok := r.BasicAuth()
+		usedSecretCredential = usedSecretCredential || (ok && gotUsername == username && gotPassword == password)
+		switch r.URL.Path {
+		case "/v2/", "/v2":
+			if !usedSecretCredential {
+				w.Header().Set("WWW-Authenticate", `Basic realm="registry"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case "/v2/charts/demo/manifests/" + tag:
+			usedOriginalTag = true
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core API to scheme: %v", err)
+	}
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("add application API to scheme: %v", err)
+	}
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "private-oci"},
+		Spec:       appv2.RepoSpec{CredentialSecretRef: &corev1.SecretReference{Name: "repo-cred"}},
+	}
+	appVersion := &appv2.ApplicationVersion{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-version", Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name}},
+		Spec:       appv2.ApplicationVersionSpec{VersionName: "1.1.0+build.1", PullUrl: fmt.Sprintf("oci://%s/charts/demo:%s", server.Listener.Addr(), tag)},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: constants.KubeSphereNamespace, Name: "repo-cred"},
+		Data: map[string][]byte{
+			"username":  []byte(username),
+			"password":  []byte(password),
+			"plainHTTP": []byte("true"),
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo, appVersion, secret).Build()
+
+	_, _ = FailOverGet(CmStore{Client: client}, nil, appVersion.Name, client, true)
+	if !usedOriginalTag {
+		t.Fatalf("DownLoadChart did not receive original OCI tag %q", tag)
+	}
+	if !usedSecretCredential {
+		t.Fatal("OCI chart download did not use credentialSecretRef")
+	}
+}
