@@ -124,7 +124,7 @@ func (r *RepoReconciler) failRepoSync(ctx context.Context, helmRepo *appv2.Repo,
 
 func (r *RepoReconciler) skipSync(helmRepo *appv2.Repo) (bool, error) {
 	logger := r.logger.WithValues("repo", helmRepo.Name)
-	if helmRepo.Status.State == appv2.StatusManualTrigger || helmRepo.Status.State == appv2.StatusSyncing {
+	if helmRepo.Status.State == appv2.StatusCreated || helmRepo.Status.State == appv2.StatusManualTrigger || helmRepo.Status.State == appv2.StatusSyncing {
 		logger.V(4).Info(fmt.Sprintf("repo state: %s", helmRepo.Status.State))
 		return false, nil
 	}
@@ -344,8 +344,8 @@ func (r *RepoReconciler) repoParseRequest(ctx context.Context, versions helmrepo
 		legalVersion = application.FormatVersion(ver.Version)
 		shortName = application.GenerateShortNameMD5Hash(ver.Name)
 		key := fmt.Sprintf("%s-%s-%s", helmRepo.Name, shortName, legalVersion)
-		dig := appVersionDigestMap[key]
-		if ver.Digest == "" || dig == ver.Digest {
+		dig, exists := appVersionDigestMap[key]
+		if exists && (ver.Digest == "" || dig == ver.Digest) {
 			continue
 		}
 		if dig != "" {
