@@ -180,9 +180,9 @@ func inspectOCIChart(ctx context.Context, reg *oci.Registry, repository, tag str
 	return &helmrepo.ChartVersion{Metadata: metadata, URLs: []string{pullURL}, Digest: digest}, nil
 }
 
-// ValidateOCIRepository checks connectivity and that the repository exposes at least one SemVer tag.
+// ValidateOCIRepository checks connectivity and that the repository exposes at least one Helm chart.
 func ValidateOCIRepository(u string, cred appv2.RepoCredential) error {
-	index, err := LoadRepoIndexFromOciTags(u, cred)
+	index, err := LoadRepoIndexFromOci(u, cred)
 	if err != nil {
 		return err
 	}
@@ -191,7 +191,7 @@ func ValidateOCIRepository(u string, cred appv2.RepoCredential) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("no OCI chart tags found at %s", u)
+	return fmt.Errorf("no valid OCI Helm charts found at %s", u)
 }
 
 func getOCITags(ctx context.Context, reg *oci.Registry, repository string) ([]string, error) {

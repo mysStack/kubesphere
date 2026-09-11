@@ -96,7 +96,7 @@ func TestCreateHTTPRepoValidatesIndex(t *testing.T) {
 	}
 }
 
-func TestValidateOCIRepoReadsOnlyNewestChartMetadata(t *testing.T) {
+func TestValidateOCIRepoReadsHelmMetadata(t *testing.T) {
 	metadata, err := json.Marshal(chart.Metadata{APIVersion: "v2", Name: "demo", Version: "2.0.0"})
 	if err != nil {
 		t.Fatalf("marshal chart metadata: %v", err)
@@ -116,7 +116,7 @@ func TestValidateOCIRepoReadsOnlyNewestChartMetadata(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		case "/v2/charts/demo/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "2.0.0"}})
-		case "/v2/charts/demo/manifests/2.0.0":
+		case "/v2/charts/demo/manifests/1.0.0", "/v2/charts/demo/manifests/2.0.0":
 			w.Header().Set("Content-Type", ocispec.MediaTypeImageManifest)
 			_, _ = w.Write(manifest)
 		case "/v2/charts/demo/blobs/" + configDigest.String():
@@ -148,6 +148,62 @@ func TestValidateOCIRepoReadsOnlyNewestChartMetadata(t *testing.T) {
 	container.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("validate repo status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	repo := &appv2.Repo{}
+	if err := h.client.Get(context.Background(), runtimeclient.ObjectKey{Name: "oci-repo"}, repo); err == nil {
+		t.Fatal("OCI repository was persisted during validation")
+	}
+}
+
+func TestValidateOCIRepoRejectsDockerImage(t *testing.T) {
+	manifest, err := json.Marshal(ocispec.Manifest{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig, Digest: digest.FromString("image-config"), Size: 2},
+		Layers:    []ocispec.Descriptor{{MediaType: ocispec.MediaTypeImageLayer, Digest: digest.FromString("image-layer"), Size: 5}},
+	})
+	if err != nil {
+		t.Fatalf("marshal OCI image manifest: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/", "/v2":
+			w.WriteHeader(http.StatusOK)
+		case "/v2/charts/demo/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "2.0.0"}})
+		case "/v2/charts/demo/manifests/1.0.0", "/v2/charts/demo/manifests/2.0.0":
+			w.Header().Set("Content-Type", ocispec.MediaTypeImageManifest)
+			_, _ = w.Write(manifest)
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	h := &appHandler{client: fake.NewClientBuilder().WithScheme(scheme).Build()}
+	ws := new(restful.WebService)
+	ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+	ws.Route(ws.POST("/repos").To(h.CreateOrUpdateRepo))
+	container := restful.NewContainer()
+	container.Add(ws)
+	body, err := json.Marshal(&appv2.Repo{ObjectMeta: metav1.ObjectMeta{Name: "image-repo"}, Spec: appv2.RepoSpec{Url: "oci://" + server.Listener.Addr().String() + "/charts/demo", Credential: appv2.RepoCredential{PlainHTTP: true}}})
+	if err != nil {
+		t.Fatalf("marshal repo: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/repos?validate=true", bytes.NewReader(body))
+	req.Header.Set("Content-Type", restful.MIME_JSON)
+	container.ServeHTTP(recorder, req)
+	if recorder.Code == http.StatusOK {
+		t.Fatalf("validate Docker image repo status = %d, want non-%d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	repo := &appv2.Repo{}
+	if err := h.client.Get(context.Background(), runtimeclient.ObjectKey{Name: "image-repo"}, repo); err == nil {
+		t.Fatal("Docker image repository was persisted during validation")
 	}
 }
 
