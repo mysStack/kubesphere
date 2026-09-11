@@ -224,6 +224,198 @@ func TestRepoReconcilerDeletesApplicationsAndVersionsRemovedFromOCIRepo(t *testi
 	}
 }
 
+func TestRepoReconcilerPreservesApplicationsWhenOCIIndexIsPartial(t *testing.T) {
+	server := newOCIControllerServer(t, []ociControllerChartFixture{
+		{
+			repository: "charts/valid",
+			tag:        "1.0.0",
+			digest:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			config:     `{"apiVersion":"v2","name":"valid","version":"1.0.0"}`,
+		},
+		{
+			repository: "charts/warned",
+			tag:        "1.0.0",
+			digest:     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			config:     `{"name":`,
+		},
+	})
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "partial-oci-repo", UID: types.UID("repo-uid")},
+		Spec: appv2.RepoSpec{
+			Url:        fmt.Sprintf("oci://%s", server.Listener.Addr()),
+			Credential: appv2.RepoCredential{PlainHTTP: true},
+			SyncPeriod: ptr.To(0),
+		},
+		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	warnedAppName := repo.Name + "-" + appclient.GenerateShortNameMD5Hash("warned")
+	warnedApp := &appv2.Application{ObjectMeta: metav1.ObjectMeta{
+		Name:   warnedAppName,
+		Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name},
+	}}
+	warnedVersion := &appv2.ApplicationVersion{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   warnedAppName + "-1.0.0",
+			Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name, appv2.AppIDLabelKey: warnedAppName},
+		},
+		Spec: appv2.ApplicationVersionSpec{VersionName: "1.0.0", Digest: "sha256:old"},
+	}
+	reconciler, _ := newRepoReconcilerTestClient(t, repo, warnedApp, warnedVersion)
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: warnedApp.Name}, &appv2.Application{}); err != nil {
+		t.Fatalf("warned application was removed: %v", err)
+	}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: warnedVersion.Name}, &appv2.ApplicationVersion{}); err != nil {
+		t.Fatalf("warned application version was removed: %v", err)
+	}
+	validAppName := repo.Name + "-" + appclient.GenerateShortNameMD5Hash("valid")
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: validAppName}, &appv2.Application{}); err != nil {
+		t.Fatalf("valid application was not synchronized: %v", err)
+	}
+}
+
+func TestRepoReconcilerUpdatesOCIChartWhenDigestChanges(t *testing.T) {
+	const newDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	server := newOCIControllerServer(t, []ociControllerChartFixture{{
+		repository: "charts/demo",
+		tag:        "1.0.0",
+		digest:     newDigest,
+		config:     `{"apiVersion":"v2","name":"demo","version":"1.0.0","description":"updated"}`,
+	}})
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "changed-digest-repo", UID: types.UID("repo-uid")},
+		Spec: appv2.RepoSpec{
+			Url:        fmt.Sprintf("oci://%s", server.Listener.Addr()),
+			Credential: appv2.RepoCredential{PlainHTTP: true},
+			SyncPeriod: ptr.To(0),
+		},
+		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	appName := repo.Name + "-" + appclient.GenerateShortNameMD5Hash("demo")
+	app := &appv2.Application{ObjectMeta: metav1.ObjectMeta{Name: appName, Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name}}}
+	oldCreated := &metav1.Time{Time: time.Unix(123, 0)}
+	version := &appv2.ApplicationVersion{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   appName + "-1.0.0",
+			Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name, appv2.AppIDLabelKey: appName},
+		},
+		Spec: appv2.ApplicationVersionSpec{VersionName: "1.0.0", Digest: "sha256:old", Created: oldCreated},
+	}
+	reconciler, _ := newRepoReconcilerTestClient(t, repo, app, version)
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	updated := &appv2.ApplicationVersion{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: version.Name}, updated); err != nil {
+		t.Fatalf("get application version: %v", err)
+	}
+	if updated.Spec.Digest != newDigest {
+		t.Fatalf("application version digest = %q, want %q", updated.Spec.Digest, newDigest)
+	}
+	if updated.Spec.Created.Equal(oldCreated) {
+		t.Fatalf("application version Created = %v, want update after digest change", updated.Spec.Created)
+	}
+}
+
+func TestRepoReconcilerMarksOCIRepoFailedWhenOnlyInvalidArtifactsAreFound(t *testing.T) {
+	server := newOCIControllerServer(t, []ociControllerChartFixture{{
+		repository: "charts/invalid",
+		tag:        "1.0.0",
+		digest:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		config:     `{"name":`,
+	}})
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "invalid-artifacts-repo"},
+		Spec: appv2.RepoSpec{
+			Url:        fmt.Sprintf("oci://%s", server.Listener.Addr()),
+			Credential: appv2.RepoCredential{PlainHTTP: true},
+			SyncPeriod: ptr.To(0),
+		},
+		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	reconciler, _ := newRepoReconcilerTestClient(t, repo)
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err == nil {
+		t.Fatal("Reconcile() error = nil, want no valid OCI Helm charts error")
+	}
+	updated := &appv2.Repo{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: repo.Name}, updated); err != nil {
+		t.Fatalf("get repo: %v", err)
+	}
+	if updated.Status.State != appv2.StatusFailed {
+		t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusFailed)
+	}
+}
+
+func TestRepoReconcilerEmitsOneWarningEventPerOCIIndexWarning(t *testing.T) {
+	server := newOCIControllerServer(t, []ociControllerChartFixture{
+		{
+			repository: "charts/valid",
+			tag:        "1.0.0",
+			digest:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			config:     `{"apiVersion":"v2","name":"valid","version":"1.0.0"}`,
+		},
+		{
+			repository: "charts/broken-one",
+			tag:        "1.0.0",
+			digest:     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			config:     `{"name":`,
+		},
+		{
+			repository: "charts/broken-two",
+			tag:        "2.0.0",
+			digest:     "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			config:     `{"name":`,
+		},
+	})
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "warning-events-repo", UID: types.UID("repo-uid")},
+		Spec: appv2.RepoSpec{
+			Url:        fmt.Sprintf("oci://%s", server.Listener.Addr()),
+			Credential: appv2.RepoCredential{PlainHTTP: true},
+			SyncPeriod: ptr.To(0),
+		},
+		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	reconciler, recorder := newRepoReconcilerTestClient(t, repo)
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	warningEvents := 0
+	warnedRepositories := map[string]bool{}
+	for queued := len(recorder.Events); queued > 0; queued-- {
+		event := <-recorder.Events
+		if !strings.HasPrefix(event, corev1.EventTypeWarning+" OCIIndexWarning ") {
+			continue
+		}
+		warningEvents++
+		for _, repository := range []string{"charts/broken-one", "charts/broken-two"} {
+			if strings.Contains(event, repository) {
+				warnedRepositories[repository] = true
+			}
+		}
+	}
+	if warningEvents != 2 {
+		t.Fatalf("warning event count = %d, want 2", warningEvents)
+	}
+	if !warnedRepositories["charts/broken-one"] || !warnedRepositories["charts/broken-two"] {
+		t.Fatalf("warning events covered repositories = %v", warnedRepositories)
+	}
+}
+
 func TestRepoReconcilerMarksOCIRepoFailedWhenTagsCannotBeLoaded(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v2/" || r.URL.Path == "/v2" {
