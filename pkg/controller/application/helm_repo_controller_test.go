@@ -7,9 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
-	"helm.sh/helm/v3/pkg/chart"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -22,7 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-func TestRepoReconcilerKeepsOCIRepoSyncingWhenNoChartMetadataIsReady(t *testing.T) {
+func TestRepoReconcilerMarksOCIRepoFailedWhenTagsCannotBeLoaded(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v2/" || r.URL.Path == "/v2" {
 			w.WriteHeader(http.StatusOK)
@@ -35,6 +33,7 @@ func TestRepoReconcilerKeepsOCIRepoSyncingWhenNoChartMetadataIsReady(t *testing.
 		ObjectMeta: metav1.ObjectMeta{Name: "unreachable-oci-repo"},
 		Spec: appv2.RepoSpec{
 			Url:        "oci://" + server.Listener.Addr().String() + "/charts",
+			Credential: appv2.RepoCredential{PlainHTTP: true},
 			SyncPeriod: ptr.To(0),
 		},
 		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
@@ -62,19 +61,19 @@ func TestRepoReconcilerKeepsOCIRepoSyncingWhenNoChartMetadataIsReady(t *testing.
 	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: repo.Name},
 	})
-	if err != nil {
-		t.Fatalf("Reconcile() error = %v", err)
+	if err == nil {
+		t.Fatal("Reconcile() error = nil, want tag loading error")
 	}
 
 	updated := &appv2.Repo{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: repo.Name}, updated); err != nil {
 		t.Fatalf("get repo: %v", err)
 	}
-	if updated.Status.State != appv2.StatusSyncing {
-		t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusSyncing)
+	if updated.Status.State != appv2.StatusFailed {
+		t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusFailed)
 	}
-	if result.RequeueAfter != 30*time.Second {
-		t.Fatalf("requeue after = %s, want 30s", result.RequeueAfter)
+	if result.RequeueAfter != 0 {
+		t.Fatalf("requeue after = %s, want 0", result.RequeueAfter)
 	}
 }
 
@@ -102,9 +101,10 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 		},
 		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
 	}
+	appName := repo.Name + "-" + appclient.GenerateShortNameMD5Hash("demo")
 	app := &appv2.Application{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   "cached-oci-repo-demo",
+			Name:   appName,
 			Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name},
 			Annotations: map[string]string{
 				appv2.AppOriginalNameLabelKey: "demo",
@@ -113,10 +113,10 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 	}
 	version := &appv2.ApplicationVersion{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "cached-oci-repo-demo-1-0-0",
+			Name: appName + "-1.0.0",
 			Labels: map[string]string{
 				appv2.RepoIDLabelKey: repo.Name,
-				appv2.AppIDLabelKey:  app.Name,
+				appv2.AppIDLabelKey:  appName,
 			},
 		},
 		Spec: appv2.ApplicationVersionSpec{
@@ -132,7 +132,7 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 	if err := appv2.AddToScheme(scheme); err != nil {
 		t.Fatalf("add application API to scheme: %v", err)
 	}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appv2.Repo{}).WithObjects(repo, app, version).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appv2.Repo{}, &appv2.Application{}, &appv2.ApplicationVersion{}).WithObjects(repo, app, version).Build()
 	reconciler := &RepoReconciler{Client: client, recorder: record.NewFakeRecorder(1)}
 
 	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}})
@@ -146,31 +146,11 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 	if updated.Status.State != appv2.StatusSuccessful {
 		t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusSuccessful)
 	}
-}
-
-func TestRepoReconcilerPersistsOCIIndexStateInConfigMap(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add core API to scheme: %v", err)
+	updatedVersion := &appv2.ApplicationVersion{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: version.Name}, updatedVersion); err != nil {
+		t.Fatalf("get application version: %v", err)
 	}
-	if err := appv2.AddToScheme(scheme); err != nil {
-		t.Fatalf("add application API to scheme: %v", err)
-	}
-	reconciler := &RepoReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build()}
-	repo := &appv2.Repo{ObjectMeta: metav1.ObjectMeta{Name: "oci-index-state"}, Spec: appv2.RepoSpec{Url: "oci://registry.example/charts/demo"}}
-	state := appclient.NewOCIIndexState(repo.Spec.Url)
-	if err := state.Index.MustAdd(&chart.Metadata{APIVersion: "v2", Name: "demo", Version: "1.0.0"}, "", "oci://registry.example/charts/demo:1.0.0", "cached-digest"); err != nil {
-		t.Fatalf("add index entry: %v", err)
-	}
-
-	if err := reconciler.saveOCIIndexState(context.Background(), repo, state); err != nil {
-		t.Fatalf("saveOCIIndexState() error = %v", err)
-	}
-	loaded, err := reconciler.loadOCIIndexState(context.Background(), repo)
-	if err != nil {
-		t.Fatalf("loadOCIIndexState() error = %v", err)
-	}
-	if loaded.Source != repo.Spec.Url || len(loaded.Index.Entries["demo"]) != 1 {
-		t.Fatalf("loaded OCI index state = %#v", loaded)
+	if updatedVersion.Spec.Digest != "cached-digest" {
+		t.Fatalf("application version digest = %q, want cached-digest", updatedVersion.Spec.Digest)
 	}
 }
