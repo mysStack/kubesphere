@@ -9,7 +9,6 @@ package application
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -68,7 +67,7 @@ func LoadRepoIndexFromOciTags(u string, cred appv2.RepoCredential) (idx helmrepo
 	if err != nil {
 		return idx, err
 	}
-	repoCharts, err := GetRepoChartsFromOci(parsedURL, cred)
+	repoCharts, err := DiscoverOCIRepositories(context.Background(), parsedURL, cred)
 	if err != nil {
 		return idx, err
 	}
@@ -133,79 +132,6 @@ func getOCITags(ctx context.Context, reg *oci.Registry, repository string) ([]st
 
 func isAuxiliaryOCITag(tag string) bool {
 	return strings.HasSuffix(tag, "-metadata")
-}
-
-func GetRepoChartsFromOci(parsedURL *url.URL, cred appv2.RepoCredential) ([]string, error) {
-	if parsedURL == nil {
-		return nil, errors.New("missing parsedURL")
-	}
-
-	skipTLS := true
-	if cred.InsecureSkipTLSVerify != nil && !*cred.InsecureSkipTLSVerify {
-		skipTLS = false
-	}
-
-	options := []oci.RegistryOption{
-		oci.WithTimeout(ociRequestTimeout),
-		oci.WithBasicAuth(cred.Username, cred.Password),
-		oci.WithInsecureSkipVerifyTLS(skipTLS),
-	}
-	if cred.PlainHTTP {
-		options = append(options, oci.WithPlainHTTP())
-	}
-
-	reg, err := oci.NewRegistry(parsedURL.Host, options...)
-	if err != nil {
-		return nil, err
-	}
-
-	ctx := context.Background()
-
-	repoPath := strings.TrimSuffix(parsedURL.Path, "/")
-	repoPath = strings.TrimPrefix(repoPath, "/")
-	if repoPath != "" {
-		repo, err := reg.Repository(ctx, repoPath)
-		if err == nil {
-			var tags []string
-			err = repo.Tags(ctx, func(ts []string) error {
-				tags = append(tags, ts...)
-				return nil
-			})
-			if err == nil {
-				if len(tags) == 0 {
-					return nil, nil
-				}
-				return []string{repoPath}, nil
-			}
-			if !isOCIRepositoryNotFound(err) {
-				return nil, err
-			}
-		}
-	}
-
-	var repoCharts []string
-	err = reg.Repositories(ctx, "", func(repos []string) error {
-		if repoPath == "" {
-			repoCharts = append(repoCharts, repos...)
-			return nil
-		}
-
-		cutPrefix := repoPath + "/"
-		for _, repo := range repos {
-			if subRepo, found := strings.CutPrefix(repo, cutPrefix); found && subRepo != "" {
-				if !strings.Contains(subRepo, "/") {
-					repoCharts = append(repoCharts, fmt.Sprintf("%s/%s", repoPath, subRepo))
-				}
-			}
-		}
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	return repoCharts, nil
 }
 
 func isOCIRepositoryNotFound(err error) bool {

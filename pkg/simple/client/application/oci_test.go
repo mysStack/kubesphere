@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ import (
 	appv2 "kubesphere.io/api/application/v2"
 )
 
-func TestGetRepoChartsFromOciWithCatalog(t *testing.T) {
+func TestDiscoverOCIRepositoriesCatalog(t *testing.T) {
 	testRepos := []string{"helmcharts/nginx", "helmcharts/test-api", "helmcharts/test-ui", "helmcharts/demo-app"}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && (r.URL.Path == "/v2" || r.URL.Path == "/v2/") {
@@ -38,7 +39,6 @@ func TestGetRepoChartsFromOciWithCatalog(t *testing.T) {
 			}
 			return
 		}
-
 		t.Logf("unexpected access: %s %s", r.Method, r.URL)
 		w.WriteHeader(http.StatusNotFound)
 	}))
@@ -50,9 +50,9 @@ func TestGetRepoChartsFromOciWithCatalog(t *testing.T) {
 	}
 
 	cred := appv2.RepoCredential{PlainHTTP: true}
-	repos, err := GetRepoChartsFromOci(serverURL, cred)
+	repos, err := DiscoverOCIRepositories(context.Background(), serverURL, cred)
 	if err != nil {
-		t.Fatalf("GetRepoChartsFromOci() error: %s", err)
+		t.Fatalf("DiscoverOCIRepositories() error: %s", err)
 	}
 	if len(repos) != len(testRepos) {
 		t.Fatalf("expected %d repos, got %d", len(testRepos), len(repos))
@@ -80,8 +80,8 @@ func TestOCIRegistryAllowsSlowRegistryResponse(t *testing.T) {
 	}
 }
 
-func TestGetRepoChartsFromOciDirectRepoPath(t *testing.T) {
-	testRepo := "helmcharts/nginx"
+func TestDiscoverOCIRepositoriesDirectChart(t *testing.T) {
+	testRepo := "charts/demo"
 	testTags := []string{"1.0.0", "1.2.0", "1.0.3"}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && (r.URL.Path == "/v2" || r.URL.Path == "/v2/") {
@@ -104,7 +104,6 @@ func TestGetRepoChartsFromOciDirectRepoPath(t *testing.T) {
 			}
 			return
 		}
-
 		t.Logf("unexpected access: %s %s", r.Method, r.URL)
 		w.WriteHeader(http.StatusNotFound)
 	}))
@@ -122,23 +121,23 @@ func TestGetRepoChartsFromOciDirectRepoPath(t *testing.T) {
 	}
 
 	cred := appv2.RepoCredential{PlainHTTP: true}
-	repos, err := GetRepoChartsFromOci(parsedURL, cred)
+	repos, err := DiscoverOCIRepositories(context.Background(), parsedURL, cred)
 	if err != nil {
-		t.Fatalf("GetRepoChartsFromOci() error: %s", err)
+		t.Fatalf("DiscoverOCIRepositories() error: %s", err)
 	}
 	if len(repos) != 1 || repos[0] != testRepo {
 		t.Fatalf("expected repos [%s], got %v", testRepo, repos)
 	}
 }
 
-func TestGetRepoChartsFromOciFallsBackToCatalogForNamespace(t *testing.T) {
-	testRepos := []string{"helmcharts/nginx", "helmcharts/test-api", "other/demo"}
+func TestDiscoverOCIRepositoriesFallsBackToCatalog(t *testing.T) {
+	testRepos := []string{"charts/demo", "charts/demo", "charts/nested/child", "charts/traefik", "other/demo"}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && (r.URL.Path == "/v2" || r.URL.Path == "/v2/") {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		if r.Method == http.MethodGet && r.URL.Path == "/v2/helmcharts/tags/list" {
+		if r.Method == http.MethodGet && r.URL.Path == "/v2/charts/tags/list" {
 			w.WriteHeader(http.StatusNotFound)
 			result := struct {
 				Errors []struct {
@@ -169,6 +168,10 @@ func TestGetRepoChartsFromOciFallsBackToCatalogForNamespace(t *testing.T) {
 			}
 			return
 		}
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v2.0/ping" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		t.Logf("unexpected access: %s %s", r.Method, r.URL)
 		w.WriteHeader(http.StatusNotFound)
@@ -180,18 +183,81 @@ func TestGetRepoChartsFromOciFallsBackToCatalogForNamespace(t *testing.T) {
 		t.Fatalf("invalid test http server: %v", err)
 	}
 
-	ociURL := fmt.Sprintf("oci://%s/helmcharts", serverURL.Host)
+	ociURL := fmt.Sprintf("oci://%s/charts", serverURL.Host)
 	parsedURL, err := url.Parse(ociURL)
 	if err != nil {
 		t.Fatalf("invalid OCI URL: %v", err)
 	}
 
-	repos, err := GetRepoChartsFromOci(parsedURL, appv2.RepoCredential{PlainHTTP: true})
+	repos, err := DiscoverOCIRepositories(context.Background(), parsedURL, appv2.RepoCredential{PlainHTTP: true})
 	if err != nil {
-		t.Fatalf("GetRepoChartsFromOci() error: %s", err)
+		t.Fatalf("DiscoverOCIRepositories() error: %s", err)
 	}
-	if len(repos) != 2 {
-		t.Fatalf("expected 2 repos, got %d: %v", len(repos), repos)
+	if want := []string{"charts/demo", "charts/traefik"}; !reflect.DeepEqual(repos, want) {
+		t.Fatalf("repositories = %v, want %v", repos, want)
+	}
+}
+
+func TestDiscoverOCIRepositoriesHarborProject(t *testing.T) {
+	const project = "helm"
+	const repository = "helm/traefik"
+	const username = "robot"
+	const password = "secret"
+	pages := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v2/helm/tags/list":
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"code": "NAME_UNKNOWN", "message": "repository name not known to registry"}}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2.0/ping":
+			if gotUser, gotPassword, ok := r.BasicAuth(); !ok || gotUser != username || gotPassword != password {
+				t.Errorf("Harbor ping did not include the expected basic authentication")
+			}
+			_, _ = w.Write([]byte("Pong"))
+		case r.Method == http.MethodHead && r.URL.Path == "/api/v2.0/projects":
+			if got := r.URL.Query().Get("project_name"); got != project {
+				t.Errorf("project_name = %q, want %q", got, project)
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2.0/projects/helm/repositories":
+			if got := r.URL.Query().Get("page_size"); got != "100" {
+				t.Errorf("page_size = %q, want 100", got)
+			}
+			switch r.URL.Query().Get("page") {
+			case "1":
+				pages++
+				_ = json.NewEncoder(w).Encode([]map[string]string{{"name": repository}})
+			case "2":
+				pages++
+				_ = json.NewEncoder(w).Encode([]map[string]string{})
+			default:
+				t.Errorf("unexpected page %q", r.URL.Query().Get("page"))
+				w.WriteHeader(http.StatusBadRequest)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	source, err := url.Parse(fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), project))
+	if err != nil {
+		t.Fatalf("parse source: %v", err)
+	}
+	repositories, err := DiscoverOCIRepositories(context.Background(), source, appv2.RepoCredential{
+		Username:  username,
+		Password:  password,
+		PlainHTTP: true,
+	})
+	if err != nil {
+		t.Fatalf("DiscoverOCIRepositories() error: %v", err)
+	}
+	if want := []string{repository}; !reflect.DeepEqual(repositories, want) {
+		t.Fatalf("repositories = %v, want %v", repositories, want)
+	}
+	if pages != 2 {
+		t.Fatalf("repository pages = %d, want 2", pages)
 	}
 }
 
