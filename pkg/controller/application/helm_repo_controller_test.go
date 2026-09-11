@@ -262,7 +262,19 @@ func TestRepoReconcilerPreservesApplicationsWhenOCIIndexIsPartial(t *testing.T) 
 		},
 		Spec: appv2.ApplicationVersionSpec{VersionName: "1.0.0", Digest: "sha256:old"},
 	}
-	reconciler, _ := newRepoReconcilerTestClient(t, repo, warnedApp, warnedVersion)
+	validAppName := repo.Name + "-" + appclient.GenerateShortNameMD5Hash("valid")
+	validApp := &appv2.Application{ObjectMeta: metav1.ObjectMeta{
+		Name:   validAppName,
+		Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name},
+	}}
+	staleValidVersion := &appv2.ApplicationVersion{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   validAppName + "-0.9.0",
+			Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name, appv2.AppIDLabelKey: validAppName},
+		},
+		Spec: appv2.ApplicationVersionSpec{VersionName: "0.9.0", Digest: "sha256:old-valid"},
+	}
+	reconciler, _ := newRepoReconcilerTestClient(t, repo, warnedApp, warnedVersion, validApp, staleValidVersion)
 
 	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -273,7 +285,9 @@ func TestRepoReconcilerPreservesApplicationsWhenOCIIndexIsPartial(t *testing.T) 
 	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: warnedVersion.Name}, &appv2.ApplicationVersion{}); err != nil {
 		t.Fatalf("warned application version was removed: %v", err)
 	}
-	validAppName := repo.Name + "-" + appclient.GenerateShortNameMD5Hash("valid")
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: staleValidVersion.Name}, &appv2.ApplicationVersion{}); err != nil {
+		t.Fatalf("version omitted from partial index was removed: %v", err)
+	}
 	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: validAppName}, &appv2.Application{}); err != nil {
 		t.Fatalf("valid application was not synchronized: %v", err)
 	}
