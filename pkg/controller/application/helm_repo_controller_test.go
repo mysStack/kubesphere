@@ -7,46 +7,74 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"helm.sh/helm/v3/pkg/chart"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	appv2 "kubesphere.io/api/application/v2"
+	appclient "kubesphere.io/kubesphere/pkg/simple/client/application"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-func TestRepoReconcilerMarksRepoFailedWhenIndexLoadFails(t *testing.T) {
+func TestRepoReconcilerKeepsOCIRepoSyncingWhenNoChartMetadataIsReady(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/" || r.URL.Path == "/v2" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
 	repo := &appv2.Repo{
 		ObjectMeta: metav1.ObjectMeta{Name: "unreachable-oci-repo"},
 		Spec: appv2.RepoSpec{
-			Url:        "oci://127.0.0.1:1/charts",
+			Url:        "oci://" + server.Listener.Addr().String() + "/charts",
 			SyncPeriod: ptr.To(0),
 		},
 		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
 	}
 	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core API to scheme: %v", err)
+	}
 	if err := appv2.AddToScheme(scheme); err != nil {
 		t.Fatalf("add application API to scheme: %v", err)
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appv2.Repo{}).WithObjects(repo).Build()
+	if err := client.Status().Update(context.Background(), repo); err != nil {
+		t.Fatalf("set repo status: %v", err)
+	}
+	stored := &appv2.Repo{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: repo.Name}, stored); err != nil {
+		t.Fatalf("get repo after status update: %v", err)
+	}
+	if stored.Status.State != appv2.StatusManualTrigger {
+		t.Fatalf("repo status = %q, want %q", stored.Status.State, appv2.StatusManualTrigger)
+	}
 	reconciler := &RepoReconciler{Client: client, recorder: record.NewFakeRecorder(1)}
 
-	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: repo.Name},
 	})
-	if err == nil {
-		t.Fatal("Reconcile() error = nil, want an OCI index load error")
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
 	}
 
 	updated := &appv2.Repo{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: repo.Name}, updated); err != nil {
 		t.Fatalf("get repo: %v", err)
 	}
-	if updated.Status.State != appv2.StatusFailed {
-		t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusFailed)
+	if updated.Status.State != appv2.StatusSyncing {
+		t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusSyncing)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("requeue after = %s, want 30s", result.RequeueAfter)
 	}
 }
 
@@ -98,6 +126,9 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 		},
 	}
 	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core API to scheme: %v", err)
+	}
 	if err := appv2.AddToScheme(scheme); err != nil {
 		t.Fatalf("add application API to scheme: %v", err)
 	}
@@ -114,5 +145,32 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 	}
 	if updated.Status.State != appv2.StatusSuccessful {
 		t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusSuccessful)
+	}
+}
+
+func TestRepoReconcilerPersistsOCIIndexStateInConfigMap(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core API to scheme: %v", err)
+	}
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("add application API to scheme: %v", err)
+	}
+	reconciler := &RepoReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build()}
+	repo := &appv2.Repo{ObjectMeta: metav1.ObjectMeta{Name: "oci-index-state"}, Spec: appv2.RepoSpec{Url: "oci://registry.example/charts/demo"}}
+	state := appclient.NewOCIIndexState(repo.Spec.Url)
+	if err := state.Index.MustAdd(&chart.Metadata{APIVersion: "v2", Name: "demo", Version: "1.0.0"}, "", "oci://registry.example/charts/demo:1.0.0", "cached-digest"); err != nil {
+		t.Fatalf("add index entry: %v", err)
+	}
+
+	if err := reconciler.saveOCIIndexState(context.Background(), repo, state); err != nil {
+		t.Fatalf("saveOCIIndexState() error = %v", err)
+	}
+	loaded, err := reconciler.loadOCIIndexState(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("loadOCIIndexState() error = %v", err)
+	}
+	if loaded.Source != repo.Spec.Url || len(loaded.Index.Entries["demo"]) != 1 {
+		t.Fatalf("loaded OCI index state = %#v", loaded)
 	}
 }

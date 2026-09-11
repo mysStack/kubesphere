@@ -52,6 +52,50 @@ type RepoReconciler struct {
 	logger   logr.Logger
 }
 
+const ociIndexConfigMapPrefix = "oci-index-"
+
+func ociIndexConfigMapName(repo *appv2.Repo) string {
+	return ociIndexConfigMapPrefix + application.GenerateShortNameMD5Hash(repo.Name)
+}
+
+func (r *RepoReconciler) loadOCIIndexState(ctx context.Context, repo *appv2.Repo) (*application.OCIIndexState, error) {
+	configMap := &corev1.ConfigMap{}
+	key := client.ObjectKey{Namespace: appv2.ApplicationNamespace, Name: ociIndexConfigMapName(repo)}
+	if err := r.Get(ctx, key, configMap); err != nil {
+		if apierrors.IsNotFound(err) {
+			return application.NewOCIIndexState(repo.Spec.Url), nil
+		}
+		return nil, err
+	}
+	data := configMap.BinaryData[appv2.BinaryKey]
+	state := application.NewOCIIndexState(repo.Spec.Url)
+	if len(data) == 0 {
+		return state, nil
+	}
+	if err := json.Unmarshal(data, state); err != nil {
+		return nil, fmt.Errorf("decode OCI index cache %s: %w", configMap.Name, err)
+	}
+	return state, nil
+}
+
+func (r *RepoReconciler) saveOCIIndexState(ctx context.Context, repo *appv2.Repo, state *application.OCIIndexState) error {
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("encode OCI index cache: %w", err)
+	}
+	configMap := &corev1.ConfigMap{}
+	configMap.Name = ociIndexConfigMapName(repo)
+	configMap.Namespace = appv2.ApplicationNamespace
+	_, err = ctrl.CreateOrUpdate(ctx, r.Client, configMap, func() error {
+		if configMap.BinaryData == nil {
+			configMap.BinaryData = make(map[string][]byte)
+		}
+		configMap.BinaryData[appv2.BinaryKey] = data
+		return nil
+	})
+	return err
+}
+
 func (r *RepoReconciler) Name() string {
 	return helmRepoController
 }
@@ -229,14 +273,27 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	}
 
 	var index helmrepo.IndexFile
+	syncComplete := true
 	if registry.IsOCI(helmRepo.Spec.Url) {
+		ociState, err := r.loadOCIIndexState(ctx, helmRepo)
+		if err != nil {
+			logger.Error(err, "load OCI index cache failed")
+			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+		}
 		appVersionList := &appv2.ApplicationVersionList{}
 		if err := r.Client.List(ctx, appVersionList, &opts); err != nil {
 			logger.Error(err, "list application version failed")
 			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 		}
 		cached := application.BuildOCIChartVersionCache(appList.Items, appVersionList.Items)
-		index, err = application.LoadRepoIndexFromOciWithCache(helmRepo.Spec.Url, credential, cached)
+		if len(ociState.Index.Entries) == 0 {
+			application.MergeOCIChartVersionCache(&ociState.Index, cached)
+		}
+		syncComplete, err = application.SyncOCIIndexPage(helmRepo.Spec.Url, credential, ociState, 10)
+		if err == nil {
+			err = r.saveOCIIndexState(ctx, helmRepo, ociState)
+		}
+		index = ociState.Index
 	} else {
 		index, err = application.LoadRepoIndex(helmRepo.Spec.Url, credential)
 	}
@@ -292,7 +349,11 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		}
 	}
 
-	helmRepo.Status.State = appv2.StatusSuccessful
+	if !syncComplete {
+		helmRepo.Status.State = appv2.StatusSyncing
+	} else {
+		helmRepo.Status.State = appv2.StatusSuccessful
+	}
 	err = r.UpdateStatus(ctx, helmRepo)
 	if err != nil {
 		logger.Error(err, "update status failed")
@@ -301,6 +362,9 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 
 	r.recorder.Eventf(helmRepo, corev1.EventTypeNormal, "Synced", "HelmRepo %s synced successfully", helmRepo.GetName())
 
+	if !syncComplete {
+		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+	}
 	return reconcile.Result{RequeueAfter: requeueAfter}, nil
 }
 

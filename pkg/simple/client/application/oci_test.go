@@ -351,3 +351,127 @@ func TestBuildOCIChartVersionCacheUsesApplicationVersions(t *testing.T) {
 		t.Fatalf("cached chart entry = %#v", entry)
 	}
 }
+
+func TestSyncOCIIndexPageFetchesNewestMissingTagsAndRetainsCachedVersions(t *testing.T) {
+	const repo = "charts/demo"
+	tags := []string{"1.0.0", "1.2.0", "1.1.0"}
+	manifestByPath := map[string][]byte{}
+	blobByPath := map[string][]byte{}
+	manifestRequests := map[string]int{}
+	for _, tag := range tags {
+		metadata, err := json.Marshal(chart.Metadata{APIVersion: "v2", Name: "demo", Version: tag})
+		if err != nil {
+			t.Fatalf("marshal chart metadata: %v", err)
+		}
+		configDigest := digest.FromBytes(metadata)
+		chartDigest := digest.FromString("chart " + tag)
+		manifest, err := json.Marshal(ocispec.Manifest{
+			MediaType: ocispec.MediaTypeImageManifest,
+			Config:    ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: configDigest, Size: int64(len(metadata))},
+			Layers: []ocispec.Descriptor{{
+				MediaType: registry.ChartLayerMediaType,
+				Digest:    chartDigest,
+				Size:      int64(len(tag)),
+			}},
+		})
+		if err != nil {
+			t.Fatalf("marshal OCI manifest: %v", err)
+		}
+		manifestByPath["/v2/"+repo+"/manifests/"+tag] = manifest
+		blobByPath["/v2/"+repo+"/blobs/"+configDigest.String()] = metadata
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/", "/v2":
+			w.WriteHeader(http.StatusOK)
+		case "/v2/" + repo + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": tags})
+		default:
+			if manifest, found := manifestByPath[r.URL.Path]; found {
+				manifestRequests[r.URL.Path]++
+				w.Header().Set("Content-Type", ocispec.MediaTypeImageManifest)
+				_, _ = w.Write(manifest)
+				return
+			}
+			if blob, found := blobByPath[r.URL.Path]; found {
+				_, _ = w.Write(blob)
+				return
+			}
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	url := fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repo)
+	state := NewOCIIndexState(url)
+	for _, want := range []struct {
+		version  string
+		entries  int
+		complete bool
+	}{
+		{version: "1.2.0", entries: 1, complete: false},
+		{version: "1.1.0", entries: 2, complete: false},
+		{version: "1.0.0", entries: 3, complete: true},
+	} {
+		complete, err := SyncOCIIndexPage(url, appv2.RepoCredential{PlainHTTP: true}, state, 1)
+		if err != nil {
+			t.Fatalf("SyncOCIIndexPage() error = %v", err)
+		}
+		if complete != want.complete {
+			t.Fatalf("SyncOCIIndexPage() complete = %t, want %t", complete, want.complete)
+		}
+		if got := len(state.Index.Entries["demo"]); got != want.entries {
+			t.Fatalf("cached version count = %d, want %d", got, want.entries)
+		}
+		if manifestRequests["/v2/"+repo+"/manifests/"+want.version] != 1 {
+			t.Fatalf("manifest requests for %s = %d, want 1", want.version, manifestRequests["/v2/"+repo+"/manifests/"+want.version])
+		}
+	}
+	if got := manifestRequests["/v2/"+repo+"/manifests/1.2.0"]; got != 1 {
+		t.Fatalf("cached newest version was fetched %d times, want 1", got)
+	}
+}
+
+func TestValidateOCIRepositoryReadsOnlyNewestChartMetadata(t *testing.T) {
+	const repo = "charts/demo"
+	metadata, err := json.Marshal(chart.Metadata{APIVersion: "v2", Name: "demo", Version: "3.0.0"})
+	if err != nil {
+		t.Fatalf("marshal chart metadata: %v", err)
+	}
+	configDigest := digest.FromBytes(metadata)
+	manifest, err := json.Marshal(ocispec.Manifest{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: configDigest, Size: int64(len(metadata))},
+		Layers:    []ocispec.Descriptor{{MediaType: registry.ChartLayerMediaType, Digest: digest.FromString("chart"), Size: 5}},
+	})
+	if err != nil {
+		t.Fatalf("marshal OCI manifest: %v", err)
+	}
+	manifestRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/", "/v2":
+			w.WriteHeader(http.StatusOK)
+		case "/v2/" + repo + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "3.0.0", "2.0.0"}})
+		case "/v2/" + repo + "/manifests/3.0.0":
+			manifestRequests++
+			w.Header().Set("Content-Type", ocispec.MediaTypeImageManifest)
+			_, _ = w.Write(manifest)
+		case "/v2/" + repo + "/blobs/" + configDigest.String():
+			_, _ = w.Write(metadata)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	if err := ValidateOCIRepository(fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repo), appv2.RepoCredential{PlainHTTP: true}); err != nil {
+		t.Fatalf("ValidateOCIRepository() error = %v", err)
+	}
+	if manifestRequests != 1 {
+		t.Fatalf("manifest requests = %d, want 1", manifestRequests)
+	}
+}

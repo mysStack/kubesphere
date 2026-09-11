@@ -63,7 +63,12 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 		if err = h.loadRepoCredentialSecret(req.Request.Context(), repoRequest.Spec.CredentialSecretRef, &credential); requestDone(err, resp) {
 			return
 		}
-		if _, err = application.LoadRepoIndex(repoRequest.Spec.Url, credential); requestDone(err, resp) {
+		if registry.IsOCI(repoRequest.Spec.Url) {
+			err = application.ValidateOCIRepository(repoRequest.Spec.Url, credential)
+		} else {
+			_, err = application.LoadRepoIndex(repoRequest.Spec.Url, credential)
+		}
+		if requestDone(err, resp) {
 			return
 		}
 		data := map[string]any{"ok": true}

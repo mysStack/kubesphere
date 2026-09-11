@@ -14,9 +14,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/registry"
@@ -57,6 +59,37 @@ func HelmPullFromOci(u string, cred appv2.RepoCredential) ([]byte, error) {
 
 // OCIChartVersionCache maps an OCI tag to a previously synchronized chart version.
 type OCIChartVersionCache map[string]*helmrepo.ChartVersion
+
+// OCIIndexState is the durable metadata cache for a paged OCI repository sync.
+type OCIIndexState struct {
+	Source      string              `json:"source"`
+	Index       helmrepo.IndexFile  `json:"index"`
+	IgnoredTags map[string]struct{} `json:"ignoredTags,omitempty"`
+}
+
+// NewOCIIndexState creates an empty OCI index cache for a repository.
+func NewOCIIndexState(source string) *OCIIndexState {
+	return &OCIIndexState{
+		Source:      source,
+		Index:       *helmrepo.NewIndexFile(),
+		IgnoredTags: make(map[string]struct{}),
+	}
+}
+
+// MergeOCIChartVersionCache adds previously synchronized versions to an OCI index state.
+func MergeOCIChartVersionCache(index *helmrepo.IndexFile, cached OCIChartVersionCache) {
+	if index == nil {
+		return
+	}
+	if index.Entries == nil {
+		index.Entries = make(map[string]helmrepo.ChartVersions)
+	}
+	for _, version := range cached {
+		if version != nil && version.Metadata != nil {
+			index.Entries[version.Name] = append(index.Entries[version.Name], version)
+		}
+	}
+}
 
 // BuildOCIChartVersionCache rebuilds OCI tag metadata from synchronized application versions.
 func BuildOCIChartVersionCache(apps []appv2.Application, versions []appv2.ApplicationVersion) OCIChartVersionCache {
@@ -133,6 +166,48 @@ func LoadRepoIndexFromOci(u string, cred appv2.RepoCredential) (idx helmrepo.Ind
 	return LoadRepoIndexFromOciWithCache(u, cred, nil)
 }
 
+// ValidateOCIRepository checks connectivity, tags, and one newest Helm chart artifact.
+func ValidateOCIRepository(u string, cred appv2.RepoCredential) error {
+	if !registry.IsOCI(u) {
+		return fmt.Errorf("invalid oci URL format: %s", u)
+	}
+	parsedURL, err := url.Parse(u)
+	if err != nil {
+		return err
+	}
+	repoCharts, err := GetRepoChartsFromOci(parsedURL, cred)
+	if err != nil {
+		return err
+	}
+	if len(repoCharts) == 0 {
+		return fmt.Errorf("no OCI chart repositories found at %s", u)
+	}
+	reg, err := newOCIRegistry(u, cred)
+	if err != nil {
+		return err
+	}
+	for _, repository := range repoCharts {
+		tags, err := getOCITags(context.Background(), reg, repository)
+		if err != nil {
+			return err
+		}
+		sort.Slice(tags, func(i, j int) bool { return ociTagNewer(tags[i], tags[j]) })
+		for _, tag := range tags {
+			if isAuxiliaryOCITag(tag) {
+				continue
+			}
+			if _, _, err := loadOCIChartMetadata(context.Background(), reg, repository, tag); err != nil {
+				if errors.Is(err, errNotHelmChartArtifact) {
+					continue
+				}
+				return err
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("no Helm chart artifacts found at %s", u)
+}
+
 func LoadRepoIndexFromOciWithCache(u string, cred appv2.RepoCredential, cached OCIChartVersionCache) (idx helmrepo.IndexFile, err error) {
 	if !registry.IsOCI(u) {
 		return idx, fmt.Errorf("invalid oci URL format: %s", u)
@@ -198,6 +273,135 @@ func LoadRepoIndexFromOciWithCache(u string, cred appv2.RepoCredential, cached O
 	index.SortEntries()
 
 	return *index, nil
+}
+
+// SyncOCIIndexPage adds at most batchSize uncached OCI chart tags to state.
+// A non-positive batchSize scans all currently uncached tags.
+func SyncOCIIndexPage(u string, cred appv2.RepoCredential, state *OCIIndexState, batchSize int) (bool, error) {
+	if state == nil {
+		return false, errors.New("missing OCI index state")
+	}
+	if state.Source != "" && state.Source != u {
+		*state = *NewOCIIndexState(u)
+	}
+	if state.Index.Entries == nil {
+		state.Index = *helmrepo.NewIndexFile()
+	}
+	if state.IgnoredTags == nil {
+		state.IgnoredTags = make(map[string]struct{})
+	}
+
+	parsedURL, err := url.Parse(u)
+	if err != nil || !registry.IsOCI(u) {
+		return false, fmt.Errorf("invalid oci URL format: %s", u)
+	}
+	repoCharts, err := GetRepoChartsFromOci(parsedURL, cred)
+	if err != nil {
+		return false, err
+	}
+	if len(repoCharts) == 0 {
+		return false, fmt.Errorf("no OCI chart repositories found at %s", u)
+	}
+	ociRegistry, err := newOCIRegistry(u, cred)
+	if err != nil {
+		return false, err
+	}
+
+	cached := ociChartVersionCacheFromIndex(&state.Index)
+	index := helmrepo.NewIndexFile()
+	currentTags := make(map[string]struct{})
+	type candidate struct {
+		repository string
+		tag        string
+	}
+	var candidates []candidate
+	for _, repoChart := range repoCharts {
+		tags, err := getOCITags(context.Background(), ociRegistry, repoChart)
+		if err != nil {
+			return false, fmt.Errorf("load OCI tags for %s/%s: %w", parsedURL.Host, repoChart, err)
+		}
+		for _, tag := range tags {
+			key := ociCacheKey(parsedURL.Host, repoChart, tag)
+			currentTags[key] = struct{}{}
+			if isAuxiliaryOCITag(tag) {
+				state.IgnoredTags[key] = struct{}{}
+				continue
+			}
+			if cachedVersion, found := cached[key]; found && cachedVersion.Metadata != nil {
+				index.Entries[cachedVersion.Name] = append(index.Entries[cachedVersion.Name], cachedVersion)
+				continue
+			}
+			if _, ignored := state.IgnoredTags[key]; ignored {
+				continue
+			}
+			candidates = append(candidates, candidate{repository: repoChart, tag: tag})
+		}
+	}
+	for key := range state.IgnoredTags {
+		if _, found := currentTags[key]; !found {
+			delete(state.IgnoredTags, key)
+		}
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return ociTagNewer(candidates[i].tag, candidates[j].tag)
+	})
+	processed := 0
+	for _, item := range candidates {
+		if batchSize > 0 && processed >= batchSize {
+			break
+		}
+		processed++
+		metadata, chartDigest, err := loadOCIChartMetadata(context.Background(), ociRegistry, item.repository, item.tag)
+		if err != nil {
+			if errors.Is(err, errNotHelmChartArtifact) {
+				state.IgnoredTags[ociCacheKey(parsedURL.Host, item.repository, item.tag)] = struct{}{}
+				continue
+			}
+			return false, fmt.Errorf("load OCI chart metadata for %s/%s:%s: %w", parsedURL.Host, item.repository, item.tag, err)
+		}
+		pullRef := fmt.Sprintf("%s/%s:%s", parsedURL.Host, item.repository, item.tag)
+		if err := index.MustAdd(metadata, "", fmt.Sprintf("%s://%s", registry.OCIScheme, pullRef), strings.TrimPrefix(chartDigest, "sha256:")); err != nil {
+			return false, fmt.Errorf("add OCI chart metadata for %s: %w", pullRef, err)
+		}
+	}
+	index.SortEntries()
+	state.Source = u
+	state.Index = *index
+	return len(candidates) <= processed, nil
+}
+
+func ociChartVersionCacheFromIndex(index *helmrepo.IndexFile) OCIChartVersionCache {
+	cache := make(OCIChartVersionCache)
+	if index == nil {
+		return cache
+	}
+	for _, versions := range index.Entries {
+		for _, version := range versions {
+			for _, pullURL := range version.URLs {
+				host, repository, tag, found := ociReferenceFromPullURL(pullURL)
+				if found {
+					cache[ociCacheKey(host, repository, tag)] = version
+				}
+			}
+		}
+	}
+	return cache
+}
+
+func ociTagNewer(left, right string) bool {
+	leftVersion, leftErr := semver.NewVersion(strings.ReplaceAll(left, "_", "+"))
+	rightVersion, rightErr := semver.NewVersion(strings.ReplaceAll(right, "_", "+"))
+	if leftErr == nil && rightErr == nil {
+		return leftVersion.GreaterThan(rightVersion)
+	}
+	if leftErr == nil {
+		return true
+	}
+	if rightErr == nil {
+		return false
+	}
+	return left > right
 }
 
 func getOCITags(ctx context.Context, reg *oci.Registry, repository string) ([]string, error) {
