@@ -250,6 +250,38 @@ func (r *Registry) FetchManifest(ctx context.Context, repository, tag string) (o
 	return manifest, nil
 }
 
+// FetchManifestDescriptor returns the OCI manifest and its registry digest for a tag.
+func (r *Registry) FetchManifestDescriptor(ctx context.Context, repository, tag string) (ocispec.Manifest, string, error) {
+	var manifest ocispec.Manifest
+	ref := registry.Reference{Registry: r.Reference.Registry, Repository: repository, Reference: tag}
+	if err := ref.ValidateReference(); err != nil {
+		return manifest, "", err
+	}
+
+	u := url.URL{
+		Scheme: buildScheme(r.PlainHTTP),
+		Host:   r.Reference.Host(),
+		Path:   fmt.Sprintf("/v2/%s/manifests/%s", repository, tag),
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return manifest, "", err
+	}
+	req.Header.Set("Accept", ocispec.MediaTypeImageManifest)
+	resp, err := r.do(req)
+	if err != nil {
+		return manifest, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return manifest, "", ParseErrorResponse(resp)
+	}
+	if err := json.NewDecoder(limitReader(resp.Body, r.MaxMetadataBytes)).Decode(&manifest); err != nil {
+		return manifest, "", err
+	}
+	return manifest, resp.Header.Get("Docker-Content-Digest"), nil
+}
+
 // FetchBlob downloads a single blob referenced by an OCI manifest.
 func (r *Registry) FetchBlob(ctx context.Context, repository string, desc ocispec.Descriptor) ([]byte, error) {
 	ref := registry.Reference{Registry: r.Reference.Registry, Repository: repository}
