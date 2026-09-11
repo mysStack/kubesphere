@@ -154,3 +154,91 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 		t.Fatalf("application version digest = %q, want cached-digest", updatedVersion.Spec.Digest)
 	}
 }
+
+func TestRepoReconcilerSyncsNewRepoWhenPeriodicSyncIsDisabled(t *testing.T) {
+	const chartRepo = "charts/demo"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/", "/v2":
+			w.WriteHeader(http.StatusOK)
+		case "/v2/" + chartRepo + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0"}})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-oci-repo"},
+		Spec: appv2.RepoSpec{
+			Url:        fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), chartRepo),
+			Credential: appv2.RepoCredential{PlainHTTP: true},
+			SyncPeriod: ptr.To(0),
+		},
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core API to scheme: %v", err)
+	}
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("add application API to scheme: %v", err)
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appv2.Repo{}, &appv2.Application{}, &appv2.ApplicationVersion{}).WithObjects(repo).Build()
+	reconciler := &RepoReconciler{Client: client, recorder: record.NewFakeRecorder(1)}
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	createdApp := &appv2.Application{}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: repo.Name + "-demo"}, createdApp); err != nil {
+		t.Fatalf("get synchronized application: %v", err)
+	}
+}
+
+func TestRepoReconcilerCreatesAllOCIChartVersionsWithoutDigest(t *testing.T) {
+	const chartRepo = "charts/demo"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/", "/v2":
+			w.WriteHeader(http.StatusOK)
+		case "/v2/" + chartRepo + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "2.0.0", "3.0.0"}})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "all-versions-oci-repo"},
+		Spec: appv2.RepoSpec{
+			Url:        fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), chartRepo),
+			Credential: appv2.RepoCredential{PlainHTTP: true},
+			SyncPeriod: ptr.To(0),
+		},
+		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core API to scheme: %v", err)
+	}
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("add application API to scheme: %v", err)
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appv2.Repo{}, &appv2.Application{}, &appv2.ApplicationVersion{}).WithObjects(repo).Build()
+	reconciler := &RepoReconciler{Client: client, recorder: record.NewFakeRecorder(1)}
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	versions := &appv2.ApplicationVersionList{}
+	if err := client.List(context.Background(), versions); err != nil {
+		t.Fatalf("list synchronized application versions: %v", err)
+	}
+	if got := len(versions.Items); got != 3 {
+		t.Fatalf("application version count = %d, want 3", got)
+	}
+}
