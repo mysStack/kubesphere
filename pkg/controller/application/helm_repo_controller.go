@@ -252,30 +252,33 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		key := fmt.Sprintf("%s-%s", helmRepo.Name, shortName)
 		indexMap[key] = struct{}{}
 	}
-	for _, i := range appList.Items {
-		if _, exists := indexMap[i.Name]; !exists {
-			logger.V(4).Info("application has been removed from the repo", "application", i.Name)
-			err = r.Client.Delete(ctx, &i)
-			if err != nil {
-				logger.Error(err, "delete application failed", "application", i.Name)
-				return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+	allowDeletion := len(indexWarnings) == 0
+	if allowDeletion {
+		for _, i := range appList.Items {
+			if _, exists := indexMap[i.Name]; !exists {
+				logger.V(4).Info("application has been removed from the repo", "application", i.Name)
+				err = r.Client.Delete(ctx, &i)
+				if err != nil {
+					logger.Error(err, "delete application failed", "application", i.Name)
+					return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+				}
 			}
 		}
-	}
-	appVersionList := &appv2.ApplicationVersionList{}
-	if err = r.Client.List(ctx, appVersionList, &opts); err != nil {
-		logger.Error(err, "list application versions failed")
-		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
-	}
-	for _, version := range appVersionList.Items {
-		appID := version.Labels[appv2.AppIDLabelKey]
-		if _, exists := indexMap[appID]; exists {
-			continue
-		}
-		logger.V(4).Info("application version has been removed from the repo", "application version", version.Name)
-		if err = r.Client.Delete(ctx, &version); err != nil {
-			logger.Error(err, "delete application version failed", "application version", version.Name)
+		appVersionList := &appv2.ApplicationVersionList{}
+		if err = r.Client.List(ctx, appVersionList, &opts); err != nil {
+			logger.Error(err, "list application versions failed")
 			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+		}
+		for _, version := range appVersionList.Items {
+			appID := version.Labels[appv2.AppIDLabelKey]
+			if _, exists := indexMap[appID]; exists {
+				continue
+			}
+			logger.V(4).Info("application version has been removed from the repo", "application version", version.Name)
+			if err = r.Client.Delete(ctx, &version); err != nil {
+				logger.Error(err, "delete application version failed", "application version", version.Name)
+				return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+			}
 		}
 	}
 
@@ -287,7 +290,7 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 
 		versions = filterVersions(versions)
 
-		vRequests, err := r.repoParseRequest(ctx, versions, helmRepo, appName, appList)
+		vRequests, err := r.repoParseRequest(ctx, versions, helmRepo, appName, appList, allowDeletion)
 		if err != nil {
 			logger.Error(err, "parse request failed")
 			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
@@ -322,7 +325,7 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	return reconcile.Result{RequeueAfter: requeueAfter}, nil
 }
 
-func (r *RepoReconciler) repoParseRequest(ctx context.Context, versions helmrepo.ChartVersions, helmRepo *appv2.Repo, appName string, appList *appv2.ApplicationList) (createOrUpdateList []application.AppRequest, err error) {
+func (r *RepoReconciler) repoParseRequest(ctx context.Context, versions helmrepo.ChartVersions, helmRepo *appv2.Repo, appName string, appList *appv2.ApplicationList, allowDeletion bool) (createOrUpdateList []application.AppRequest, err error) {
 	appVersionList := &appv2.ApplicationVersionList{}
 
 	logger := r.logger.WithValues("repo", helmRepo.Name)
@@ -353,11 +356,13 @@ func (r *RepoReconciler) repoParseRequest(ctx context.Context, versions helmrepo
 		key := fmt.Sprintf("%s-%s", i.GetLabels()[appv2.AppIDLabelKey], LegalVersion)
 		_, exists := versionMap[key]
 		if !exists {
-			logger.V(4).Info("delete application version", "application version", i.GetName())
-			err = r.Client.Delete(ctx, &i)
-			if err != nil {
-				logger.Error(err, "delete application version failed")
-				return nil, err
+			if allowDeletion {
+				logger.V(4).Info("delete application version", "application version", i.GetName())
+				err = r.Client.Delete(ctx, &i)
+				if err != nil {
+					logger.Error(err, "delete application version failed")
+					return nil, err
+				}
 			}
 		} else {
 			appVersionDigestMap[key] = i.Spec.Digest
