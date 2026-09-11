@@ -9,15 +9,20 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"helm.sh/helm/v3/pkg/registry"
 	appv2 "kubesphere.io/api/application/v2"
 )
 
@@ -261,18 +266,60 @@ func TestDiscoverOCIRepositoriesHarborProject(t *testing.T) {
 	}
 }
 
-func TestLoadRepoIndexFromOciTagsDoesNotFetchManifests(t *testing.T) {
-	const repo = "charts/demo"
-	manifestRequests := 0
+func TestLoadRepoIndexFromOciBuildsMetadataAndFiltersImages(t *testing.T) {
+	manifests := map[string]ocispec.Manifest{
+		"charts/traefik:1.0.0_build.1": {
+			Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: "sha256:traefik-config"},
+			Layers: []ocispec.Descriptor{{MediaType: registry.ChartLayerMediaType, Digest: "sha256:traefik-layer"}},
+		},
+		"charts/traefik:0.9.0": {
+			Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: "sha256:traefik-config"},
+			Layers: []ocispec.Descriptor{{MediaType: registry.ChartLayerMediaType, Digest: "sha256:traefik-layer"}},
+		},
+		"charts/redis:2.0.0": {
+			Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: "sha256:redis-config"},
+			Layers: []ocispec.Descriptor{{MediaType: registry.LegacyChartLayerMediaType, Digest: "sha256:redis-layer"}},
+		},
+		"images/nginx:1.0.0": {
+			Config: ocispec.Descriptor{MediaType: "application/vnd.oci.image.config.v1+json", Digest: "sha256:nginx-config"},
+		},
+		"charts/no-layer:3.0.0": {
+			Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: "sha256:no-layer-config"},
+			Layers: []ocispec.Descriptor{{MediaType: "application/vnd.example.provenance", Digest: "sha256:provenance"}},
+		},
+	}
+	blobs := map[string][]byte{
+		"sha256:traefik-config": []byte(`{"apiVersion":"v2","name":"traefik","version":"9.9.9","description":"Ingress controller","icon":"https://example.test/traefik.svg","maintainers":[{"name":"Alice"}]}`),
+		"sha256:redis-config":   []byte(`{"apiVersion":"v2","name":"redis","version":"8.8.8","description":"Redis database","icon":"https://example.test/redis.svg","maintainers":[{"name":"Bob"}]}`),
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v2/", "/v2":
+		switch {
+		case r.URL.Path == "/v2/" || r.URL.Path == "/v2":
 			w.WriteHeader(http.StatusOK)
-		case "/v2/" + repo + "/tags/list":
-			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.1.0_build.1", "1.1.0-metadata", "latest"}})
+		case r.URL.Path == "/v2/_catalog":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"repositories": {"charts/traefik", "charts/redis", "images/nginx", "charts/no-layer"}})
+		case r.URL.Path == "/v2/charts/traefik/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"0.9.0", "1.0.0_build.1"}})
+		case r.URL.Path == "/v2/charts/redis/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"2.0.0"}})
+		case r.URL.Path == "/v2/images/nginx/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0"}})
+		case r.URL.Path == "/v2/charts/no-layer/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"3.0.0"}})
 		default:
-			if strings.Contains(r.URL.Path, "/manifests/") {
-				manifestRequests++
+			for ref, manifest := range manifests {
+				repository, tag, _ := strings.Cut(ref, ":")
+				if r.URL.Path == "/v2/"+repository+"/manifests/"+tag {
+					w.Header().Set("Docker-Content-Digest", "sha256:"+strings.ReplaceAll(repository, "/", "-")+"-manifest")
+					_ = json.NewEncoder(w).Encode(manifest)
+					return
+				}
+			}
+			for digest, blob := range blobs {
+				if r.URL.Path == "/v2/charts/traefik/blobs/"+digest || r.URL.Path == "/v2/charts/redis/blobs/"+digest {
+					_, _ = w.Write(blob)
+					return
+				}
 			}
 			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -280,36 +327,55 @@ func TestLoadRepoIndexFromOciTagsDoesNotFetchManifests(t *testing.T) {
 	}))
 	defer server.Close()
 
-	index, err := LoadRepoIndexFromOciTags(
-		fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repo),
+	index, err := LoadRepoIndexFromOci(
+		fmt.Sprintf("oci://%s", server.Listener.Addr()),
 		appv2.RepoCredential{PlainHTTP: true},
 	)
 	if err != nil {
-		t.Fatalf("LoadRepoIndexFromOciTags() error = %v", err)
+		t.Fatalf("LoadRepoIndexFromOci() error = %v", err)
 	}
-	if got := len(index.Entries["demo"]); got != 2 {
+	if got := len(index.Entries); got != 2 {
 		t.Fatalf("chart entries = %d, want 2", got)
 	}
-	if got := index.Entries["demo"][0].Version; got != "1.1.0+build.1" {
-		t.Fatalf("newest chart version = %q, want 1.1.0+build.1", got)
+	traefik := index.Entries["traefik"][0]
+	if got := len(index.Entries["traefik"]); got != 2 {
+		t.Fatalf("traefik versions = %d, want 2", got)
 	}
-	wantPullURL := fmt.Sprintf("oci://%s/%s:1.1.0_build.1", server.Listener.Addr(), repo)
-	if got := index.Entries["demo"][0].URLs[0]; got != wantPullURL {
-		t.Fatalf("chart pull URL = %q, want original OCI tag", got)
+	if traefik.Description != "Ingress controller" || traefik.Icon != "https://example.test/traefik.svg" || traefik.Maintainers[0].Name != "Alice" {
+		t.Fatalf("traefik metadata = %#v", traefik.Metadata)
 	}
-	if manifestRequests != 0 {
-		t.Fatalf("manifest requests = %d, want 0", manifestRequests)
+	if got := traefik.URLs[0]; got != fmt.Sprintf("oci://%s/charts/traefik:1.0.0_build.1", server.Listener.Addr()) {
+		t.Fatalf("chart pull URL = %q", got)
+	}
+	if got := traefik.Digest; got != "sha256:charts-traefik-manifest" {
+		t.Fatalf("manifest digest = %q", got)
+	}
+	if got := traefik.Version; got != "1.0.0+build.1" {
+		t.Fatalf("chart version = %q, want normalized tag", got)
+	}
+	redis := index.Entries["redis"][0]
+	if redis.Description != "Redis database" || redis.Icon != "https://example.test/redis.svg" || redis.Maintainers[0].Name != "Bob" {
+		t.Fatalf("redis metadata = %#v", redis.Metadata)
 	}
 }
 
-func TestLoadRepoIndexUsesTagsForOCIRepositories(t *testing.T) {
-	const repo = "charts/demo"
+func TestLoadOCIRepoIndexKeepsValidChartsAndReportsArtifactFailures(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v2/", "/v2":
-			w.WriteHeader(http.StatusOK)
-		case "/v2/" + repo + "/tags/list":
+		case "/v2/_catalog":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"repositories": {"charts/broken", "charts/good"}})
+		case "/v2/charts/broken/tags/list", "/v2/charts/good/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0"}})
+		case "/v2/charts/broken/manifests/1.0.0":
+			w.Header().Set("Docker-Content-Digest", "sha256:broken-manifest")
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:broken-config"))
+		case "/v2/charts/good/manifests/1.0.0":
+			w.Header().Set("Docker-Content-Digest", "sha256:good-manifest")
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:good-config"))
+		case "/v2/charts/broken/blobs/sha256:broken-config":
+			_, _ = w.Write([]byte(`{"name":`))
+		case "/v2/charts/good/blobs/sha256:good-config":
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"good","version":"9.9.9"}`))
 		default:
 			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -317,29 +383,82 @@ func TestLoadRepoIndexUsesTagsForOCIRepositories(t *testing.T) {
 	}))
 	defer server.Close()
 
-	index, err := LoadRepoIndex(fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repo), appv2.RepoCredential{PlainHTTP: true})
+	index, warnings, err := LoadOCIRepoIndex(context.Background(), fmt.Sprintf("oci://%s", server.Listener.Addr()), appv2.RepoCredential{PlainHTTP: true})
 	if err != nil {
-		t.Fatalf("LoadRepoIndex() error = %v", err)
+		t.Fatalf("LoadOCIRepoIndex() error = %v", err)
 	}
-	if got := len(index.Entries["demo"]); got != 1 {
-		t.Fatalf("chart entries = %d, want 1", got)
+	if len(index.Entries["good"]) != 1 || len(index.Entries["broken"]) != 0 {
+		t.Fatalf("index entries = %v, want only good", index.Entries)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one", warnings)
+	}
+	var warning *OCIIndexWarning
+	if !errors.As(warnings[0], &warning) {
+		t.Fatalf("warning type = %T, want *OCIIndexWarning", warnings[0])
+	}
+	if warning.Repository != "charts/broken" || warning.Tag != "1.0.0" {
+		t.Fatalf("warning = %#v", warning)
+	}
+	publicIndex, err := LoadRepoIndexFromOci(fmt.Sprintf("oci://%s", server.Listener.Addr()), appv2.RepoCredential{PlainHTTP: true})
+	if err != nil || len(publicIndex.Entries["good"]) != 1 {
+		t.Fatalf("LoadRepoIndexFromOci() = entries %v, error %v; want usable partial index", publicIndex.Entries, err)
 	}
 }
 
-func TestValidateOCIRepositoryAcceptsTagsWithoutFetchingManifests(t *testing.T) {
+func TestLoadOCIRepoIndexSkipsAuxiliaryAndInvalidTagsBeforeManifestRequests(t *testing.T) {
+	const repository = "charts/good"
+	manifestRequests := make(map[string]int)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/" + repository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.0.0-metadata", "latest"}})
+		case "/v2/" + repository + "/manifests/1.0.0":
+			manifestRequests["1.0.0"]++
+			w.Header().Set("Docker-Content-Digest", "sha256:good-manifest")
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:good-config"))
+		case "/v2/" + repository + "/blobs/sha256:good-config":
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"good","version":"1.0.0"}`))
+		default:
+			if strings.Contains(r.URL.Path, "/manifests/") {
+				manifestRequests[path.Base(r.URL.Path)]++
+			}
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	index, warnings, err := LoadOCIRepoIndex(context.Background(), fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repository), appv2.RepoCredential{PlainHTTP: true})
+	if err != nil || len(warnings) != 0 || len(index.Entries["good"]) != 1 {
+		t.Fatalf("LoadOCIRepoIndex() = entries %v, warnings %v, error %v", index.Entries, warnings, err)
+	}
+	if !reflect.DeepEqual(manifestRequests, map[string]int{"1.0.0": 1}) {
+		t.Fatalf("manifest requests = %v", manifestRequests)
+	}
+}
+
+func helmOCIManifest(configDigest string) ocispec.Manifest {
+	return ocispec.Manifest{
+		Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: digest.Digest(configDigest)},
+		Layers: []ocispec.Descriptor{{MediaType: registry.ChartLayerMediaType}},
+	}
+}
+
+func TestValidateOCIRepositoryAcceptsInspectedHelmArtifact(t *testing.T) {
 	const repo = "charts/demo"
-	manifestRequests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/", "/v2":
 			w.WriteHeader(http.StatusOK)
 		case "/v2/" + repo + "/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "3.0.0", "2.0.0"}})
+		case "/v2/" + repo + "/manifests/1.0.0", "/v2/" + repo + "/manifests/2.0.0", "/v2/" + repo + "/manifests/3.0.0":
+			w.Header().Set("Docker-Content-Digest", "sha256:manifest")
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: "sha256:config"}, Layers: []ocispec.Descriptor{{MediaType: registry.ChartLayerMediaType}}})
+		case "/v2/" + repo + "/blobs/sha256:config":
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"1.0.0"}`))
 		default:
-			if strings.Contains(r.URL.Path, "/manifests/") {
-				manifestRequests++
-			}
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
@@ -347,8 +466,5 @@ func TestValidateOCIRepositoryAcceptsTagsWithoutFetchingManifests(t *testing.T) 
 
 	if err := ValidateOCIRepository(fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repo), appv2.RepoCredential{PlainHTTP: true}); err != nil {
 		t.Fatalf("ValidateOCIRepository() error = %v", err)
-	}
-	if manifestRequests != 0 {
-		t.Fatalf("manifest requests = %d, want 0", manifestRequests)
 	}
 }

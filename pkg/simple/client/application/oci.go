@@ -9,10 +9,11 @@ package application
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 	"time"
 
@@ -27,6 +28,27 @@ import (
 )
 
 const ociRequestTimeout = 30 * time.Second
+
+// ErrNotHelmOCIArtifact indicates that an OCI manifest is not a Helm chart.
+// Callers can safely skip this artifact without treating it as a repository failure.
+var ErrNotHelmOCIArtifact = errors.New("OCI artifact is not a Helm chart")
+
+// OCIIndexWarning identifies one repository or tag that could not be indexed.
+// LoadOCIRepoIndex returns these warnings alongside any usable chart entries.
+type OCIIndexWarning struct {
+	Repository string
+	Tag        string
+	Err        error
+}
+
+func (w *OCIIndexWarning) Error() string {
+	if w.Tag == "" {
+		return fmt.Sprintf("index OCI repository %s: %v", w.Repository, w.Err)
+	}
+	return fmt.Sprintf("index OCI artifact %s:%s: %v", w.Repository, w.Tag, w.Err)
+}
+
+func (w *OCIIndexWarning) Unwrap() error { return w.Err }
 
 func HelmPullFromOci(u string, cred appv2.RepoCredential) ([]byte, error) {
 	if !registry.IsOCI(u) {
@@ -54,33 +76,51 @@ func HelmPullFromOci(u string, cred appv2.RepoCredential) ([]byte, error) {
 }
 
 func LoadRepoIndexFromOci(u string, cred appv2.RepoCredential) (idx helmrepo.IndexFile, err error) {
-	return LoadRepoIndexFromOciTags(u, cred)
+	idx, warnings, err := LoadOCIRepoIndex(context.Background(), u, cred)
+	if err != nil {
+		return idx, err
+	}
+	if len(idx.Entries) == 0 {
+		if len(warnings) > 0 {
+			return idx, fmt.Errorf("no valid OCI Helm charts found at %s: %w", u, errors.Join(warnings...))
+		}
+		return idx, fmt.Errorf("no valid OCI Helm charts found at %s", u)
+	}
+	return idx, nil
 }
 
-// LoadRepoIndexFromOciTags builds a repository index from OCI tags without
-// fetching individual chart manifests. The chart package is fetched on deploy.
+// LoadRepoIndexFromOciTags is retained for compatibility and now performs full
+// Helm OCI artifact inspection.
 func LoadRepoIndexFromOciTags(u string, cred appv2.RepoCredential) (idx helmrepo.IndexFile, err error) {
+	return LoadRepoIndexFromOci(u, cred)
+}
+
+// LoadOCIRepoIndex discovers repositories and inspects their Helm artifacts.
+// Warnings contain per-artifact failures and do not prevent usable entries
+// from being returned.
+func LoadOCIRepoIndex(ctx context.Context, u string, cred appv2.RepoCredential) (idx helmrepo.IndexFile, warnings []error, err error) {
 	if !registry.IsOCI(u) {
-		return idx, fmt.Errorf("invalid oci URL format: %s", u)
+		return idx, nil, fmt.Errorf("invalid oci URL format: %s", u)
 	}
 	parsedURL, err := url.Parse(u)
 	if err != nil {
-		return idx, err
+		return idx, nil, err
 	}
-	repoCharts, err := DiscoverOCIRepositories(context.Background(), parsedURL, cred)
+	repoCharts, err := DiscoverOCIRepositories(ctx, parsedURL, cred)
 	if err != nil {
-		return idx, err
+		return idx, nil, err
 	}
 	ociRegistry, err := newOCIRegistry(u, cred)
 	if err != nil {
-		return idx, err
+		return idx, nil, err
 	}
 
 	index := helmrepo.NewIndexFile()
 	for _, repoChart := range repoCharts {
-		tags, err := getOCITags(context.Background(), ociRegistry, repoChart)
+		tags, err := getOCITags(ctx, ociRegistry, repoChart)
 		if err != nil {
-			return idx, fmt.Errorf("load OCI tags for %s/%s: %w", parsedURL.Host, repoChart, err)
+			warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Err: fmt.Errorf("load OCI tags: %w", err)})
+			continue
 		}
 		for _, tag := range tags {
 			if isAuxiliaryOCITag(tag) {
@@ -90,15 +130,54 @@ func LoadRepoIndexFromOciTags(u string, cred appv2.RepoCredential) (idx helmrepo
 			if _, err := semver.NewVersion(version); err != nil {
 				continue
 			}
-			metadata := &chart.Metadata{APIVersion: "v2", Name: path.Base(repoChart), Version: version}
-			pullURL := fmt.Sprintf("%s://%s/%s:%s", registry.OCIScheme, parsedURL.Host, repoChart, tag)
-			if err := index.MustAdd(metadata, "", pullURL, ""); err != nil {
-				return idx, fmt.Errorf("add OCI tag %s: %w", pullURL, err)
+			chartVersion, err := inspectOCIChart(ctx, ociRegistry, repoChart, tag)
+			if errors.Is(err, ErrNotHelmOCIArtifact) {
+				continue
+			}
+			if err != nil {
+				warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: tag, Err: err})
+				continue
+			}
+			if err := index.MustAdd(chartVersion.Metadata, "", chartVersion.URLs[0], chartVersion.Digest); err != nil {
+				warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: tag, Err: err})
 			}
 		}
 	}
 	index.SortEntries()
-	return *index, nil
+	return *index, warnings, nil
+}
+
+// inspectOCIChart validates Helm media types and reads only the config blob
+// containing chart metadata; chart layers are intentionally not downloaded.
+func inspectOCIChart(ctx context.Context, reg *oci.Registry, repository, tag string) (*helmrepo.ChartVersion, error) {
+	manifest, digest, err := reg.FetchManifestDescriptor(ctx, repository, tag)
+	if err != nil {
+		return nil, err
+	}
+	if manifest.Config.MediaType != registry.ConfigMediaType {
+		return nil, ErrNotHelmOCIArtifact
+	}
+	hasChartLayer := false
+	for _, layer := range manifest.Layers {
+		if layer.MediaType == registry.ChartLayerMediaType || layer.MediaType == registry.LegacyChartLayerMediaType {
+			hasChartLayer = true
+			break
+		}
+	}
+	if !hasChartLayer {
+		return nil, ErrNotHelmOCIArtifact
+	}
+	config, err := reg.FetchBlob(ctx, repository, manifest.Config)
+	if err != nil {
+		return nil, err
+	}
+	metadata := new(chart.Metadata)
+	if err := json.Unmarshal(config, metadata); err != nil {
+		return nil, fmt.Errorf("decode chart metadata: %w", err)
+	}
+	metadata.Version = strings.ReplaceAll(tag, "_", "+")
+	pullURL := fmt.Sprintf("%s://%s/%s:%s", registry.OCIScheme, reg.Reference.Host(), repository, tag)
+	return &helmrepo.ChartVersion{Metadata: metadata, URLs: []string{pullURL}, Digest: digest}, nil
 }
 
 // ValidateOCIRepository checks connectivity and that the repository exposes at least one SemVer tag.
