@@ -296,14 +296,14 @@ func (r *Registry) FetchManifestDescriptor(ctx context.Context, repository, tag 
 	if err != nil {
 		return manifest, "", err
 	}
-	if err := json.Unmarshal(body, &manifest); err != nil {
-		return manifest, "", err
-	}
 	manifestDigest := resp.Header.Get("Docker-Content-Digest")
 	if parsed, err := digest.Parse(manifestDigest); err == nil {
 		manifestDigest = parsed.String()
 	} else {
 		manifestDigest = digest.FromBytes(body).String()
+	}
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return manifest, manifestDigest, err
 	}
 	return manifest, manifestDigest, nil
 }

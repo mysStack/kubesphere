@@ -225,7 +225,7 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 func inspectOCIChart(ctx context.Context, reg *oci.Registry, repository, tag string, cached *helmrepo.ChartVersion) (*helmrepo.ChartVersion, string, error) {
 	manifest, digest, err := reg.FetchManifestDescriptor(ctx, repository, tag)
 	if err != nil {
-		return nil, "", err
+		return nil, digest, err
 	}
 	if manifest.Config.MediaType != registry.ConfigMediaType {
 		return nil, digest, ErrNotHelmOCIArtifact
@@ -336,8 +336,7 @@ func newOCIRegistryClient(u string, cred appv2.RepoCredential) (*registry.Client
 
 	if cred.Username != "" || cred.Password != "" {
 		err = client.Login(parsedURL.Host,
-			registry.LoginOptBasicAuth(cred.Username, cred.Password),
-			registry.LoginOptInsecure(cred.PlainHTTP))
+			registry.LoginOptBasicAuth(cred.Username, cred.Password))
 
 		if err != nil {
 			return nil, err

@@ -446,6 +446,66 @@ func TestHelmPullFromOCIUsesClientCertificate(t *testing.T) {
 	}
 }
 
+func TestHelmPullFromOCIUsesInsecureTLSWithBasicAuth(t *testing.T) {
+	const username, password = "fixture-user", "fixture-password"
+	config := []byte(`{"apiVersion":"v2","name":"demo","version":"1.0.0"}`)
+	chartData := []byte("chart archive")
+	configDigest := digest.FromBytes(config)
+	chartDigest := digest.FromBytes(chartData)
+	manifest := ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		Config:    ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: configDigest, Size: int64(len(config))},
+		Layers:    []ocispec.Descriptor{{MediaType: registry.ChartLayerMediaType, Digest: chartDigest, Size: int64(len(chartData))}},
+	}
+	manifestData, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/" || r.URL.Path == "/v2" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if gotUser, gotPassword, ok := r.BasicAuth(); !ok || gotUser != username || gotPassword != password {
+			w.Header().Set("WWW-Authenticate", `Basic realm="registry"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var data []byte
+		switch r.URL.Path {
+		case "/v2/charts/demo/manifests/1.0.0":
+			data = manifestData
+			w.Header().Set("Docker-Content-Digest", digest.FromBytes(manifestData).String())
+			w.Header().Set("Content-Type", ocispec.MediaTypeImageManifest)
+		case "/v2/charts/demo/blobs/" + configDigest.String():
+			data = config
+			w.Header().Set("Content-Type", registry.ConfigMediaType)
+		case "/v2/charts/demo/blobs/" + chartDigest.String():
+			data = chartData
+			w.Header().Set("Content-Type", registry.ChartLayerMediaType)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+		if r.Method != http.MethodHead {
+			_, _ = w.Write(data)
+		}
+	}))
+	defer server.Close()
+
+	got, err := HelmPullFromOci("oci://"+server.Listener.Addr().String()+"/charts/demo:1.0.0", appv2.RepoCredential{
+		Username: username, Password: password, InsecureSkipTLSVerify: ptr.To(true),
+	})
+	if err != nil {
+		t.Fatalf("HelmPullFromOci() error: %v", err)
+	}
+	if !reflect.DeepEqual(got, chartData) {
+		t.Fatalf("chart data = %q, want %q", got, chartData)
+	}
+}
+
 func TestOCIClientsRejectInvalidTLSFilesBeforeNetworking(t *testing.T) {
 	const username = "fixture-user"
 	const password = "fixture-password"
@@ -624,6 +684,39 @@ func TestLoadOCIRepoIndexKeepsValidChartsAndReportsArtifactFailures(t *testing.T
 	publicIndex, err := LoadRepoIndexFromOci(fmt.Sprintf("oci://%s", server.Listener.Addr()), appv2.RepoCredential{PlainHTTP: true})
 	if err != nil || len(publicIndex.Entries["good"]) != 1 {
 		t.Fatalf("LoadRepoIndexFromOci() = entries %v, error %v; want usable partial index", publicIndex.Entries, err)
+	}
+}
+
+func TestLoadOCIRepoIndexWarningIncludesDigestForMalformedManifest(t *testing.T) {
+	const repository = "charts/broken"
+	manifest := []byte(`{"schemaVersion":`)
+	manifestDigest := digest.FromBytes(manifest).String()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/" + repository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0"}})
+		case "/v2/" + repository + "/manifests/1.0.0":
+			_, _ = w.Write(manifest)
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	index, warnings, err := LoadOCIRepoIndex(context.Background(), fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repository), appv2.RepoCredential{PlainHTTP: true})
+	if err != nil || len(index.Entries) != 0 {
+		t.Fatalf("LoadOCIRepoIndex() = entries %v, error %v", index.Entries, err)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one", warnings)
+	}
+	var warning *OCIIndexWarning
+	if !errors.As(warnings[0], &warning) {
+		t.Fatalf("warning type = %T", warnings[0])
+	}
+	if warning.Digest != manifestDigest {
+		t.Fatalf("warning digest = %q, want %q", warning.Digest, manifestDigest)
 	}
 }
 
