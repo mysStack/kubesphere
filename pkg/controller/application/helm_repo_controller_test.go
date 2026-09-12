@@ -490,6 +490,7 @@ func TestRepoReconcilerMarksOCIRepoFailedWhenTagsCannotBeLoaded(t *testing.T) {
 func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 	const chartRepo = "charts/demo"
 	const manifestDigest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	configRequests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/", "/v2":
@@ -500,6 +501,7 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 			w.Header().Set("Docker-Content-Digest", manifestDigest)
 			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: digest.FromString("cached-config")}, Layers: []ocispec.Descriptor{{MediaType: registry.ChartLayerMediaType}}})
 		case "/v2/" + chartRepo + "/blobs/" + digest.FromString("cached-config").String():
+			configRequests++
 			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"1.0.0"}`))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -572,6 +574,15 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 	}
 	if !updatedVersion.Spec.Created.Equal(version.Spec.Created) {
 		t.Fatalf("application version Created changed from %v to %v", version.Spec.Created, updatedVersion.Spec.Created)
+	}
+	if configRequests != 0 {
+		t.Fatalf("config requests = %d, want 0 for unchanged manifest digest", configRequests)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+	if configRequests != 0 {
+		t.Fatalf("config requests after second reconcile = %d, want 0", configRequests)
 	}
 }
 

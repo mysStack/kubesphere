@@ -8,16 +8,70 @@ package oci
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
 
+	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
+func TestFetchManifestDescriptorComputesDigestWhenHeaderMissing(t *testing.T) {
+	body := []byte(`{"schemaVersion":2,"config":{"mediaType":"application/vnd.example.config.v1+json","digest":"sha256:config","size":7}}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/charts/example/manifests/1.0.0" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", ocispec.MediaTypeImageManifest)
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	reg, err := NewRegistry(serverURL.Host, WithPlainHTTP())
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	_, got, err := reg.FetchManifestDescriptor(context.Background(), "charts/example", "1.0.0")
+	if err != nil {
+		t.Fatalf("FetchManifestDescriptor() error = %v", err)
+	}
+	want := digest.NewDigestFromEncoded(digest.SHA256, fmt.Sprintf("%x", sha256.Sum256(body))).String()
+	if got != want {
+		t.Fatalf("manifest digest = %q, want %q", got, want)
+	}
+}
+
+func TestFetchBlobRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "0123456789")
+	}))
+	defer server.Close()
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	reg, err := NewRegistry(serverURL.Host, WithPlainHTTP())
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	reg.MaxMetadataBytes = 5
+	_, err = reg.FetchBlob(context.Background(), "charts/example", ocispec.Descriptor{Digest: "sha256:blob"})
+	if err == nil {
+		t.Fatal("FetchBlob() error = nil, want oversized response error")
+	}
+}
+
 func TestFetchManifestDescriptorReturnsDigest(t *testing.T) {
+	const manifestDigest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 	manifest := ocispec.Manifest{
 		Config: ocispec.Descriptor{
 			MediaType: "application/vnd.example.config.v1+json",
@@ -31,7 +85,7 @@ func TestFetchManifestDescriptorReturnsDigest(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		w.Header().Set("Docker-Content-Digest", "sha256:manifest-digest")
+		w.Header().Set("Docker-Content-Digest", manifestDigest)
 		w.Header().Set("Content-Type", ocispec.MediaTypeImageManifest)
 		_ = json.NewEncoder(w).Encode(manifest)
 	}))
@@ -53,8 +107,8 @@ func TestFetchManifestDescriptorReturnsDigest(t *testing.T) {
 	if got.Config.Digest != manifest.Config.Digest {
 		t.Fatalf("manifest config digest = %q, want %q", got.Config.Digest, manifest.Config.Digest)
 	}
-	if digest != "sha256:manifest-digest" {
-		t.Fatalf("manifest digest = %q, want %q", digest, "sha256:manifest-digest")
+	if digest != manifestDigest {
+		t.Fatalf("manifest digest = %q, want %q", digest, manifestDigest)
 	}
 }
 

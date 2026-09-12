@@ -168,10 +168,10 @@ func DiscoverOCIRepositories(ctx context.Context, source *url.URL, cred appv2.Re
 
 	if ociRepositoryPath(source) != "" {
 		repositories, err := (singleChartProvider{}).Discover(ctx, source, cred)
-		if err == nil {
+		if err == nil && len(repositories) > 0 {
 			return repositories, nil
 		}
-		if !isOCIRepositoryNotFound(err) {
+		if err != nil && !isOCIRepositoryNotFound(err) {
 			return nil, err
 		}
 

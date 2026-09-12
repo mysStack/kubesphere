@@ -9,11 +9,13 @@ package application
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 	helmrepo "helm.sh/helm/v3/pkg/repo"
 	"k8s.io/klog/v2"
 	appv2 "kubesphere.io/api/application/v2"
+	ksconstants "kubesphere.io/kubesphere/pkg/constants"
 
 	"kubesphere.io/kubesphere/pkg/simple/client/oci"
 )
@@ -38,12 +41,16 @@ var ErrNotHelmOCIArtifact = errors.New("OCI artifact is not a Helm chart")
 type OCIIndexWarning struct {
 	Repository string
 	Tag        string
+	Digest     string
 	Err        error
 }
 
 func (w *OCIIndexWarning) Error() string {
 	if w.Tag == "" {
 		return fmt.Sprintf("index OCI repository %s: %v", w.Repository, w.Err)
+	}
+	if w.Digest != "" {
+		return fmt.Sprintf("index OCI artifact %s:%s (%s): %v", w.Repository, w.Tag, w.Digest, w.Err)
 	}
 	return fmt.Sprintf("index OCI artifact %s:%s: %v", w.Repository, w.Tag, w.Err)
 }
@@ -99,6 +106,72 @@ func LoadRepoIndexFromOciTags(u string, cred appv2.RepoCredential) (idx helmrepo
 // Warnings contain per-artifact failures and do not prevent usable entries
 // from being returned.
 func LoadOCIRepoIndex(ctx context.Context, u string, cred appv2.RepoCredential) (idx helmrepo.IndexFile, warnings []error, err error) {
+	return LoadOCIRepoIndexWithCache(ctx, u, cred, nil)
+}
+
+// OCIChartVersionCache maps an original OCI reference to cached chart metadata.
+type OCIChartVersionCache map[string]*helmrepo.ChartVersion
+
+// BuildOCIChartVersionCache builds cache entries from synchronized Applications and ApplicationVersions.
+func BuildOCIChartVersionCache(apps []appv2.Application, versions []appv2.ApplicationVersion) OCIChartVersionCache {
+	appMetadata := make(map[string]*chart.Metadata, len(apps))
+	for i := range apps {
+		app := &apps[i]
+		name := app.Annotations[appv2.AppOriginalNameLabelKey]
+		if name == "" {
+			continue
+		}
+		appMetadata[app.Name] = &chart.Metadata{Name: name, Home: app.Spec.AppHome, Icon: app.Spec.Icon, Description: app.Annotations[ksconstants.DescriptionAnnotationKey]}
+	}
+	cache := make(OCIChartVersionCache)
+	for i := range versions {
+		version := &versions[i]
+		metadata, found := appMetadata[version.Labels[appv2.AppIDLabelKey]]
+		if !found {
+			continue
+		}
+		host, repository, tag, found := ociReferenceFromPullURL(version.Spec.PullUrl)
+		if !found {
+			continue
+		}
+		cachedMetadata := *metadata
+		cachedMetadata.Version = version.Spec.VersionName
+		cachedMetadata.Home = version.Spec.AppHome
+		cachedMetadata.Icon = version.Spec.Icon
+		if description := version.Annotations[ksconstants.DescriptionAnnotationKey]; description != "" {
+			cachedMetadata.Description = description
+		}
+		cachedMetadata.Maintainers = chartMaintainers(version.Spec.Maintainer)
+		cache[ociCacheKey(host, repository, tag)] = &helmrepo.ChartVersion{Metadata: &cachedMetadata, URLs: []string{version.Spec.PullUrl}, Digest: version.Spec.Digest, Created: version.CreationTimestamp.Time}
+	}
+	return cache
+}
+
+func ociReferenceFromPullURL(pullURL string) (host, repository, tag string, found bool) {
+	u, err := url.Parse(pullURL)
+	if err != nil || !registry.IsOCI(pullURL) {
+		return "", "", "", false
+	}
+	reference := strings.TrimPrefix(u.Path, "/")
+	separator := strings.LastIndex(reference, ":")
+	if u.Host == "" || separator <= 0 || separator == len(reference)-1 {
+		return "", "", "", false
+	}
+	return u.Host, reference[:separator], reference[separator+1:], true
+}
+
+func ociCacheKey(host, repository, tag string) string { return host + "/" + repository + ":" + tag }
+
+func chartMaintainers(maintainers []appv2.Maintainer) []*chart.Maintainer {
+	result := make([]*chart.Maintainer, 0, len(maintainers))
+	for _, maintainer := range maintainers {
+		result = append(result, &chart.Maintainer{Name: maintainer.Name, Email: maintainer.Email, URL: maintainer.URL})
+	}
+	return result
+}
+
+// LoadOCIRepoIndexWithCache loads OCI metadata, reusing cached config metadata when manifest digests match.
+func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCredential, cached OCIChartVersionCache) (idx helmrepo.IndexFile, warnings []error, err error) {
 	if !registry.IsOCI(u) {
 		return idx, nil, fmt.Errorf("invalid oci URL format: %s", u)
 	}
@@ -130,16 +203,16 @@ func LoadOCIRepoIndex(ctx context.Context, u string, cred appv2.RepoCredential) 
 			if _, err := semver.StrictNewVersion(version); err != nil {
 				continue
 			}
-			chartVersion, err := inspectOCIChart(ctx, ociRegistry, repoChart, tag)
+			chartVersion, digest, err := inspectOCIChart(ctx, ociRegistry, repoChart, tag, cached[ociCacheKey(parsedURL.Host, repoChart, tag)])
 			if errors.Is(err, ErrNotHelmOCIArtifact) {
 				continue
 			}
 			if err != nil {
-				warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: tag, Err: err})
+				warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: tag, Digest: digest, Err: err})
 				continue
 			}
 			if err := index.MustAdd(chartVersion.Metadata, "", chartVersion.URLs[0], chartVersion.Digest); err != nil {
-				warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: tag, Err: err})
+				warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: tag, Digest: chartVersion.Digest, Err: err})
 			}
 		}
 	}
@@ -149,13 +222,13 @@ func LoadOCIRepoIndex(ctx context.Context, u string, cred appv2.RepoCredential) 
 
 // inspectOCIChart validates Helm media types and reads only the config blob
 // containing chart metadata; chart layers are intentionally not downloaded.
-func inspectOCIChart(ctx context.Context, reg *oci.Registry, repository, tag string) (*helmrepo.ChartVersion, error) {
+func inspectOCIChart(ctx context.Context, reg *oci.Registry, repository, tag string, cached *helmrepo.ChartVersion) (*helmrepo.ChartVersion, string, error) {
 	manifest, digest, err := reg.FetchManifestDescriptor(ctx, repository, tag)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if manifest.Config.MediaType != registry.ConfigMediaType {
-		return nil, ErrNotHelmOCIArtifact
+		return nil, digest, ErrNotHelmOCIArtifact
 	}
 	hasChartLayer := false
 	for _, layer := range manifest.Layers {
@@ -165,19 +238,24 @@ func inspectOCIChart(ctx context.Context, reg *oci.Registry, repository, tag str
 		}
 	}
 	if !hasChartLayer {
-		return nil, ErrNotHelmOCIArtifact
+		return nil, digest, ErrNotHelmOCIArtifact
+	}
+	if cached != nil && cached.Metadata != nil && cached.Digest == digest {
+		result := *cached
+		result.Digest = digest
+		return &result, digest, nil
 	}
 	config, err := reg.FetchBlob(ctx, repository, manifest.Config)
 	if err != nil {
-		return nil, err
+		return nil, digest, err
 	}
 	metadata := new(chart.Metadata)
 	if err := json.Unmarshal(config, metadata); err != nil {
-		return nil, fmt.Errorf("decode chart metadata: %w", err)
+		return nil, digest, fmt.Errorf("decode chart metadata: %w", err)
 	}
 	metadata.Version = strings.ReplaceAll(tag, "_", "+")
 	pullURL := fmt.Sprintf("%s://%s/%s:%s", registry.OCIScheme, reg.Reference.Host(), repository, tag)
-	return &helmrepo.ChartVersion{Metadata: metadata, URLs: []string{pullURL}, Digest: digest}, nil
+	return &helmrepo.ChartVersion{Metadata: metadata, URLs: []string{pullURL}, Digest: digest}, digest, nil
 }
 
 // ValidateOCIRepository checks connectivity and that the repository exposes at least one Helm chart.
@@ -231,17 +309,13 @@ func newOCIRegistryClient(u string, cred appv2.RepoCredential) (*registry.Client
 		return nil, err
 	}
 
-	reg, err := newOCIRegistry(u, cred)
+	tlsConfig, err := newOCITLSConfig(cred)
 	if err != nil {
 		return nil, err
 	}
-	skipTLS := true
-	if cred.InsecureSkipTLSVerify != nil && !*cred.InsecureSkipTLSVerify {
-		skipTLS = false
-	}
 
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: skipTLS},
+		TLSClientConfig: tlsConfig,
 		Proxy:           http.ProxyFromEnvironment,
 	}
 
@@ -250,7 +324,7 @@ func newOCIRegistryClient(u string, cred appv2.RepoCredential) (*registry.Client
 		Timeout:   5 * time.Second,
 	})}
 
-	if reg.PlainHTTP {
+	if cred.PlainHTTP {
 		opts = append(opts, registry.ClientOptPlainHTTP())
 	}
 
@@ -263,7 +337,7 @@ func newOCIRegistryClient(u string, cred appv2.RepoCredential) (*registry.Client
 	if cred.Username != "" || cred.Password != "" {
 		err = client.Login(parsedURL.Host,
 			registry.LoginOptBasicAuth(cred.Username, cred.Password),
-			registry.LoginOptInsecure(reg.PlainHTTP))
+			registry.LoginOptInsecure(cred.PlainHTTP))
 
 		if err != nil {
 			return nil, err
@@ -278,19 +352,49 @@ func newOCIRegistry(u string, cred appv2.RepoCredential) (*oci.Registry, error) 
 		return nil, err
 	}
 
-	skipTLS := true
-	if cred.InsecureSkipTLSVerify != nil && !*cred.InsecureSkipTLSVerify {
-		skipTLS = false
+	tlsConfig, err := newOCITLSConfig(cred)
+	if err != nil {
+		return nil, err
 	}
 
 	options := []oci.RegistryOption{
 		oci.WithTimeout(ociRequestTimeout),
 		oci.WithBasicAuth(cred.Username, cred.Password),
-		oci.WithInsecureSkipVerifyTLS(skipTLS),
+		oci.WithTLSClientConfig(tlsConfig),
 	}
 	if cred.PlainHTTP {
 		options = append(options, oci.WithPlainHTTP())
 	}
 
 	return oci.NewRegistry(parsedURL.Host, options...)
+}
+
+func newOCITLSConfig(cred appv2.RepoCredential) (*tls.Config, error) {
+	skipTLS := true
+	if cred.InsecureSkipTLSVerify != nil {
+		skipTLS = *cred.InsecureSkipTLSVerify
+	}
+	config := &tls.Config{InsecureSkipVerify: skipTLS}
+	if cred.CAFile != "" {
+		data, err := os.ReadFile(cred.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("load CA file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(data) {
+			return nil, fmt.Errorf("load CA file: no certificates found")
+		}
+		config.RootCAs = pool
+	}
+	if cred.CertFile != "" || cred.KeyFile != "" {
+		if cred.CertFile == "" || cred.KeyFile == "" {
+			return nil, fmt.Errorf("client certificate and key must both be specified")
+		}
+		cert, err := tls.LoadX509KeyPair(cred.CertFile, cred.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load client certificate: %w", err)
+		}
+		config.Certificates = []tls.Certificate{cert}
+	}
+	return config, nil
 }

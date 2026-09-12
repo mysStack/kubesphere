@@ -231,7 +231,13 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	var index helmrepo.IndexFile
 	var indexWarnings []error
 	if registry.IsOCI(helmRepo.Spec.Url) {
-		index, indexWarnings, err = application.LoadOCIRepoIndex(ctx, helmRepo.Spec.Url, credential)
+		appVersionList := &appv2.ApplicationVersionList{}
+		if err = r.Client.List(ctx, appVersionList, &opts); err != nil {
+			logger.Error(err, "list application versions failed")
+			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+		}
+		cached := application.BuildOCIChartVersionCache(appList.Items, appVersionList.Items)
+		index, indexWarnings, err = application.LoadOCIRepoIndexWithCache(ctx, helmRepo.Spec.Url, credential, cached)
 		if err == nil && len(index.Entries) == 0 {
 			err = fmt.Errorf("no valid OCI Helm charts found at %s", helmRepo.Spec.Url)
 		}

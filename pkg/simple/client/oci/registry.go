@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/pkg/registry"
 	"oras.land/oras-go/pkg/registry/remote"
@@ -39,6 +40,7 @@ type Registry struct {
 	password              string
 	timeout               time.Duration
 	insecureSkipVerifyTLS bool
+	tlsClientConfig       *tls.Config
 }
 
 func NewRegistry(name string, options ...RegistryOption) (*Registry, error) {
@@ -61,7 +63,7 @@ func NewRegistry(name string, options ...RegistryOption) (*Registry, error) {
 	reg.Client = &auth.Client{
 		Client: &http.Client{
 			Timeout:   reg.timeout,
-			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: reg.insecureSkipVerifyTLS}, Proxy: http.ProxyFromEnvironment},
+			Transport: &http.Transport{TLSClientConfig: reg.tlsConfig(), Proxy: http.ProxyFromEnvironment},
 		},
 		Header: headers,
 		Credential: func(_ context.Context, _ string) (auth.Credential, error) {
@@ -77,6 +79,13 @@ func NewRegistry(name string, options ...RegistryOption) (*Registry, error) {
 	}
 
 	return reg, nil
+}
+
+func (r *Registry) tlsConfig() *tls.Config {
+	if r.tlsClientConfig != nil {
+		return r.tlsClientConfig.Clone()
+	}
+	return &tls.Config{InsecureSkipVerify: r.insecureSkipVerifyTLS}
 }
 
 func WithBasicAuth(username, password string) RegistryOption {
@@ -95,6 +104,13 @@ func WithTimeout(timeout time.Duration) RegistryOption {
 func WithInsecureSkipVerifyTLS(insecureSkipVerifyTLS bool) RegistryOption {
 	return func(reg *Registry) {
 		reg.insecureSkipVerifyTLS = insecureSkipVerifyTLS
+	}
+}
+
+// WithTLSClientConfig configures CA roots and client certificates for registry requests.
+func WithTLSClientConfig(config *tls.Config) RegistryOption {
+	return func(reg *Registry) {
+		reg.tlsClientConfig = config
 	}
 }
 
@@ -276,10 +292,20 @@ func (r *Registry) FetchManifestDescriptor(ctx context.Context, repository, tag 
 	if resp.StatusCode != http.StatusOK {
 		return manifest, "", ParseErrorResponse(resp)
 	}
-	if err := json.NewDecoder(limitReader(resp.Body, r.MaxMetadataBytes)).Decode(&manifest); err != nil {
+	body, err := readBounded(resp.Body, r.MaxMetadataBytes)
+	if err != nil {
 		return manifest, "", err
 	}
-	return manifest, resp.Header.Get("Docker-Content-Digest"), nil
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return manifest, "", err
+	}
+	manifestDigest := resp.Header.Get("Docker-Content-Digest")
+	if parsed, err := digest.Parse(manifestDigest); err == nil {
+		manifestDigest = parsed.String()
+	} else {
+		manifestDigest = digest.FromBytes(body).String()
+	}
+	return manifest, manifestDigest, nil
 }
 
 // FetchBlob downloads a single blob referenced by an OCI manifest.
@@ -306,7 +332,21 @@ func (r *Registry) FetchBlob(ctx context.Context, repository string, desc ocispe
 	if resp.StatusCode != http.StatusOK {
 		return nil, ParseErrorResponse(resp)
 	}
-	return io.ReadAll(resp.Body)
+	return readBounded(resp.Body, r.MaxMetadataBytes)
+}
+
+func readBounded(reader io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxMetadataBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("response exceeds maximum size of %d bytes", maxBytes)
+	}
+	return data, nil
 }
 
 func (r *Registry) repository(repo *remote.Repository) *remote.Repository {
