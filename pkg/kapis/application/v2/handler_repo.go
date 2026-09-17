@@ -49,13 +49,22 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 	}
 
 	parsedUrl, err := url.Parse(repoRequest.Spec.Url)
-	if requestDone(err, resp) {
+	if err != nil {
+		if registry.IsOCI(repoRequest.Spec.Url) {
+			requestDone(fmt.Errorf("invalid repository URL"), resp)
+		} else {
+			requestDone(err, resp)
+		}
 		return
 	}
 
 	if parsedUrl.User != nil {
 		repoRequest.Spec.Credential.Username = parsedUrl.User.Username()
 		repoRequest.Spec.Credential.Password, _ = parsedUrl.User.Password()
+	}
+	if registry.IsOCI(repoRequest.Spec.Url) {
+		parsedUrl.User = nil
+		repoRequest.Spec.Url = parsedUrl.String()
 	}
 
 	if req.QueryParameter("validate") != "" {
@@ -98,10 +107,6 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 			CredentialSecretRef: repoRequest.Spec.CredentialSecretRef,
 			SyncPeriod:          repoRequest.Spec.SyncPeriod,
 			Description:         stringutils.ShortenString(repoRequest.Spec.Description, 512),
-		}
-		if parsedUrl.User != nil {
-			repo.Spec.Credential.Username = parsedUrl.User.Username()
-			repo.Spec.Credential.Password, _ = parsedUrl.User.Password()
 		}
 		if repo.GetLabels() == nil {
 			repo.SetLabels(map[string]string{})

@@ -230,22 +230,24 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 
 	var index helmrepo.IndexFile
 	var indexWarnings []error
+	repoURL := helmRepo.Spec.Url
 	if registry.IsOCI(helmRepo.Spec.Url) {
+		repoURL = application.SanitizeOCIURL(repoURL)
 		appVersionList := &appv2.ApplicationVersionList{}
 		if err = r.Client.List(ctx, appVersionList, &opts); err != nil {
 			logger.Error(err, "list application versions failed")
 			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 		}
 		cached := application.BuildOCIChartVersionCache(appList.Items, appVersionList.Items)
-		index, indexWarnings, err = application.LoadOCIRepoIndexWithCache(ctx, helmRepo.Spec.Url, credential, cached)
+		index, indexWarnings, err = application.LoadOCIRepoIndexWithCache(ctx, repoURL, credential, cached)
 		if err == nil && len(index.Entries) == 0 {
-			err = fmt.Errorf("no valid OCI Helm charts found at %s", helmRepo.Spec.Url)
+			err = fmt.Errorf("no valid OCI Helm charts found at %s", repoURL)
 		}
 	} else {
-		index, err = application.LoadRepoIndex(helmRepo.Spec.Url, credential)
+		index, err = application.LoadRepoIndex(repoURL, credential)
 	}
 	if err != nil {
-		logger.Error(err, "load index failed", "url", helmRepo.Spec.Url)
+		logger.Error(err, "load index failed", "url", repoURL)
 		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 	}
 	for _, warning := range indexWarnings {

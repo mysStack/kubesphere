@@ -58,21 +58,22 @@ func (w *OCIIndexWarning) Error() string {
 func (w *OCIIndexWarning) Unwrap() error { return w.Err }
 
 func HelmPullFromOci(u string, cred appv2.RepoCredential) ([]byte, error) {
+	safeURL := SanitizeOCIURL(u)
 	if !registry.IsOCI(u) {
-		return nil, fmt.Errorf("invalid oci URL format: %s", u)
+		return nil, fmt.Errorf("invalid oci URL format: %s", safeURL)
 	}
 	_, err := url.Parse(u)
 	if err != nil {
-		klog.Errorf("invalid oci chart URL format: %s, err:%v", u, err)
-		return nil, err
+		klog.Errorf("invalid oci chart URL format: %s", safeURL)
+		return nil, errors.New("invalid OCI chart URL")
 	}
 
-	client, err := newOCIRegistryClient(u, cred)
+	client, err := newOCIRegistryClient(safeURL, cred)
 	if err != nil {
 		return nil, err
 	}
 
-	pullRef := strings.TrimPrefix(u, fmt.Sprintf("%s://", registry.OCIScheme))
+	pullRef := strings.TrimPrefix(safeURL, fmt.Sprintf("%s://", registry.OCIScheme))
 	pullResult, err := client.Pull(pullRef)
 	if err != nil {
 		klog.Errorf("An error occurred to pull chart from repository: %s,err:%v", pullRef, err)
@@ -83,15 +84,16 @@ func HelmPullFromOci(u string, cred appv2.RepoCredential) ([]byte, error) {
 }
 
 func LoadRepoIndexFromOci(u string, cred appv2.RepoCredential) (idx helmrepo.IndexFile, err error) {
+	safeURL := SanitizeOCIURL(u)
 	idx, warnings, err := LoadOCIRepoIndex(context.Background(), u, cred)
 	if err != nil {
 		return idx, err
 	}
 	if len(idx.Entries) == 0 {
 		if len(warnings) > 0 {
-			return idx, fmt.Errorf("no valid OCI Helm charts found at %s: %w", u, errors.Join(warnings...))
+			return idx, fmt.Errorf("no valid OCI Helm charts found at %s: %w", safeURL, errors.Join(warnings...))
 		}
-		return idx, fmt.Errorf("no valid OCI Helm charts found at %s", u)
+		return idx, fmt.Errorf("no valid OCI Helm charts found at %s", safeURL)
 	}
 	return idx, nil
 }
@@ -162,6 +164,17 @@ func ociReferenceFromPullURL(pullURL string) (host, repository, tag string, foun
 
 func ociCacheKey(host, repository, tag string) string { return host + "/" + repository + ":" + tag }
 
+// SanitizeOCIURL removes embedded credentials before the URL is persisted,
+// returned in an error, or logged.
+func SanitizeOCIURL(rawURL string) string {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return "<invalid OCI URL>"
+	}
+	parsedURL.User = nil
+	return parsedURL.String()
+}
+
 func chartMaintainers(maintainers []appv2.Maintainer) []*chart.Maintainer {
 	result := make([]*chart.Maintainer, 0, len(maintainers))
 	for _, maintainer := range maintainers {
@@ -173,12 +186,14 @@ func chartMaintainers(maintainers []appv2.Maintainer) []*chart.Maintainer {
 // LoadOCIRepoIndexWithCache loads OCI metadata, reusing cached config metadata when manifest digests match.
 func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCredential, cached OCIChartVersionCache) (idx helmrepo.IndexFile, warnings []error, err error) {
 	if !registry.IsOCI(u) {
-		return idx, nil, fmt.Errorf("invalid oci URL format: %s", u)
+		return idx, nil, fmt.Errorf("invalid oci URL format: %s", SanitizeOCIURL(u))
 	}
 	parsedURL, err := url.Parse(u)
 	if err != nil {
-		return idx, nil, err
+		return idx, nil, errors.New("invalid OCI URL")
 	}
+	parsedURL.User = nil
+	u = parsedURL.String()
 	repoCharts, err := DiscoverOCIRepositories(ctx, parsedURL, cred)
 	if err != nil {
 		return idx, nil, err
@@ -196,7 +211,16 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 			continue
 		}
 		directRepository := len(repoCharts) == 1 && repoChart == ociRepositoryPath(parsedURL)
-		if len(cached) == 0 && directRepository {
+		currentCachedTag := false
+		if directRepository {
+			for _, tag := range semanticOCITags(tags) {
+				if cached[ociCacheKey(parsedURL.Host, repoChart, tag)] != nil {
+					currentCachedTag = true
+					break
+				}
+			}
+		}
+		if directRepository && !currentCachedTag {
 			semanticTags := semanticOCITags(tags)
 			latestTag, found := highestOCITag(semanticTags)
 			if !found {
@@ -240,6 +264,9 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 			}
 			chartVersion, digest, err := inspectOCIChart(ctx, ociRegistry, repoChart, tag, cached[ociCacheKey(parsedURL.Host, repoChart, tag)])
 			if errors.Is(err, ErrNotHelmOCIArtifact) {
+				if directRepository {
+					warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: tag, Digest: digest, Err: err})
+				}
 				continue
 			}
 			if err != nil {
@@ -338,7 +365,7 @@ func ValidateOCIRepository(u string, cred appv2.RepoCredential) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("no valid OCI Helm charts found at %s", u)
+	return fmt.Errorf("no valid OCI Helm charts found at %s", SanitizeOCIURL(u))
 }
 
 func getOCITags(ctx context.Context, reg *oci.Registry, repository string) ([]string, error) {
@@ -374,9 +401,10 @@ func isOCIRepositoryNotFound(err error) bool {
 func newOCIRegistryClient(u string, cred appv2.RepoCredential) (*registry.Client, error) {
 	parsedURL, err := url.Parse(u)
 	if err != nil {
-		klog.Errorf("invalid oci repo URL format: %s, err:%v", u, err)
-		return nil, err
+		klog.Errorf("invalid oci repo URL format: %s", SanitizeOCIURL(u))
+		return nil, errors.New("invalid OCI repository URL")
 	}
+	parsedURL.User = nil
 
 	tlsConfig, err := newOCITLSConfig(cred)
 	if err != nil {
@@ -417,8 +445,9 @@ func newOCIRegistryClient(u string, cred appv2.RepoCredential) (*registry.Client
 func newOCIRegistry(u string, cred appv2.RepoCredential) (*oci.Registry, error) {
 	parsedURL, err := url.Parse(u)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("invalid OCI repository URL")
 	}
+	parsedURL.User = nil
 
 	tlsConfig, err := newOCITLSConfig(cred)
 	if err != nil {
