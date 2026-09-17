@@ -195,7 +195,8 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 			warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Err: fmt.Errorf("load OCI tags: %w", err)})
 			continue
 		}
-		if len(cached) == 0 && len(repoCharts) == 1 && repoChart == ociRepositoryPath(parsedURL) {
+		directRepository := len(repoCharts) == 1 && repoChart == ociRepositoryPath(parsedURL)
+		if len(cached) == 0 && directRepository {
 			semanticTags := semanticOCITags(tags)
 			latestTag, found := highestOCITag(semanticTags)
 			if !found {
@@ -227,6 +228,15 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 			version := strings.ReplaceAll(tag, "_", "+")
 			if _, err := semver.StrictNewVersion(version); err != nil {
 				continue
+			}
+			if directRepository {
+				if chartVersion := cached[ociCacheKey(parsedURL.Host, repoChart, tag)]; chartVersion != nil {
+					version := cloneChartVersionForTag(chartVersion, tag)
+					if err := index.MustAdd(version.Metadata, "", version.URLs[0], version.Digest); err != nil {
+						warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: tag, Digest: version.Digest, Err: err})
+					}
+					continue
+				}
 			}
 			chartVersion, digest, err := inspectOCIChart(ctx, ociRegistry, repoChart, tag, cached[ociCacheKey(parsedURL.Host, repoChart, tag)])
 			if errors.Is(err, ErrNotHelmOCIArtifact) {

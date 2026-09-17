@@ -586,6 +586,72 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 	}
 }
 
+func TestRepoReconcilerDirectOCIReusesExistingVersionsWithoutManifestRequests(t *testing.T) {
+	const chartRepo = "charts/demo"
+	manifestRequests := 0
+	configRequests := 0
+	allowArtifactRequests := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/", "/v2":
+			w.WriteHeader(http.StatusOK)
+		case "/v2/" + chartRepo + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "2.0.0"}})
+		case "/v2/" + chartRepo + "/manifests/2.0.0":
+			if !allowArtifactRequests {
+				t.Errorf("unexpected manifest request during second reconcile")
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			manifestRequests++
+			w.Header().Set("Docker-Content-Digest", "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: digest.FromString("direct-config")}, Layers: []ocispec.Descriptor{{MediaType: registry.ChartLayerMediaType}}})
+		case "/v2/" + chartRepo + "/blobs/" + digest.FromString("direct-config").String():
+			if !allowArtifactRequests {
+				t.Errorf("unexpected config request during second reconcile")
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			configRequests++
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "direct-cache-oci-repo"},
+		Spec: appv2.RepoSpec{
+			Url:        fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), chartRepo),
+			Credential: appv2.RepoCredential{PlainHTTP: true},
+			SyncPeriod: ptr.To(0),
+		},
+		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	reconciler, _ := newRepoReconcilerTestClient(t, repo)
+	request := reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("first Reconcile() error = %v", err)
+	}
+	allowArtifactRequests = false
+	updated := &appv2.Repo{}
+	if err := reconciler.Get(context.Background(), request.NamespacedName, updated); err != nil {
+		t.Fatalf("get repo after first reconcile: %v", err)
+	}
+	updated.Status.State = appv2.StatusManualTrigger
+	if err := reconciler.Status().Update(context.Background(), updated); err != nil {
+		t.Fatalf("trigger second reconcile: %v", err)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+	if manifestRequests != 1 || configRequests != 1 {
+		t.Fatalf("manifest requests = %d, config requests = %d; want one each from the initial reconcile", manifestRequests, configRequests)
+	}
+}
+
 func TestRepoReconcilerSyncsNewRepoWhenPeriodicSyncIsDisabled(t *testing.T) {
 	const chartRepo = "charts/demo"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -633,7 +699,7 @@ func TestRepoReconcilerSyncsNewRepoWhenPeriodicSyncIsDisabled(t *testing.T) {
 	}
 }
 
-func TestRepoReconcilerCreatesAllInspectedOCIChartVersions(t *testing.T) {
+func TestRepoReconcilerCreatesAllFastIndexedOCIChartVersions(t *testing.T) {
 	const chartRepo = "charts/demo"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -683,8 +749,11 @@ func TestRepoReconcilerCreatesAllInspectedOCIChartVersions(t *testing.T) {
 		t.Fatalf("application version count = %d, want 3", got)
 	}
 	for _, version := range versions.Items {
-		if version.Spec.Digest == "" {
-			t.Errorf("application version %s has empty digest", version.Name)
+		if version.Spec.VersionName == "3.0.0" && version.Spec.Digest == "" {
+			t.Errorf("latest application version %s has empty digest", version.Name)
+		}
+		if version.Spec.VersionName != "3.0.0" && version.Spec.Digest != "" {
+			t.Errorf("historical application version %s digest = %q, want empty", version.Name, version.Spec.Digest)
 		}
 	}
 }

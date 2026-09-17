@@ -31,7 +31,9 @@ import (
 	"github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/registry"
+	helmrepo "helm.sh/helm/v3/pkg/repo"
 	"k8s.io/utils/ptr"
 	appv2 "kubesphere.io/api/application/v2"
 )
@@ -752,27 +754,21 @@ func TestLoadOCIRepoIndexSkipsAuxiliaryAndInvalidTagsBeforeManifestRequests(t *t
 	}
 }
 
-func TestLoadOCIRepoIndexWithCacheSkipsUnchangedConfigAndRefreshesChangedDigest(t *testing.T) {
+func TestLoadOCIRepoIndexWithCacheDirectRepoReusesCachedVersionWithoutManifestRequests(t *testing.T) {
 	const repository = "charts/demo"
 	const tag = "1.0.0"
 	firstDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	secondDigest := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	configRequests := 0
-	manifestDigest := firstDigest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/" + repository + "/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {tag}})
 		case "/v2/" + repository + "/manifests/" + tag:
-			w.Header().Set("Docker-Content-Digest", manifestDigest)
+			w.Header().Set("Docker-Content-Digest", firstDigest)
 			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:config"))
 		case "/v2/" + repository + "/blobs/sha256:config":
 			configRequests++
-			if manifestDigest == firstDigest {
-				_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"1.0.0","description":"old"}`))
-			} else {
-				_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0","description":"new"}`))
-			}
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"1.0.0","description":"old"}`))
 		default:
 			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -793,16 +789,15 @@ func TestLoadOCIRepoIndexWithCacheSkipsUnchangedConfigAndRefreshesChangedDigest(
 	if configRequests != 1 {
 		t.Fatalf("config requests after unchanged digest = %d, want 1", configRequests)
 	}
-	manifestDigest = secondDigest
 	third, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), u, cred, cache)
 	if err != nil || len(warnings) != 0 {
 		t.Fatalf("changed load = entries %v, warnings %v, error %v", third.Entries, warnings, err)
 	}
-	if configRequests != 2 {
-		t.Fatalf("config requests after changed digest = %d, want 2", configRequests)
+	if configRequests != 1 {
+		t.Fatalf("config requests after cached load = %d, want 1", configRequests)
 	}
-	if third.Entries["demo"][0].Digest != secondDigest || third.Entries["demo"][0].Description != "new" {
-		t.Fatalf("changed chart = %#v", third.Entries["demo"][0])
+	if third.Entries["demo"][0].Digest != firstDigest || third.Entries["demo"][0].Description != "old" {
+		t.Fatalf("cached chart = %#v", third.Entries["demo"][0])
 	}
 }
 
@@ -852,6 +847,58 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoUsesLatestMetadataForAllTags(t *test
 	}
 	if manifestRequests != 1 || configRequests != 1 {
 		t.Fatalf("got %d manifest and %d config requests, want 1 each", manifestRequests, configRequests)
+	}
+}
+
+func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsOnlyNewTags(t *testing.T) {
+	const repository = "charts/demo"
+	const oldDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	const newDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	manifestRequests := make(map[string]int)
+	configRequests := make(map[string]int)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/" + repository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.2.0", "2.0.0"}})
+		case "/v2/" + repository + "/manifests/2.0.0":
+			manifestRequests["2.0.0"]++
+			w.Header().Set("Docker-Content-Digest", newDigest)
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:new-config"))
+		case "/v2/" + repository + "/blobs/sha256:new-config":
+			configRequests["2.0.0"]++
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	u := fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repository)
+	cache := OCIChartVersionCache{}
+	for _, tag := range []string{"1.0.0", "1.2.0"} {
+		cache[ociCacheKey(server.Listener.Addr().String(), repository, tag)] = &helmrepo.ChartVersion{
+			Metadata: &chart.Metadata{Name: "demo", Version: tag},
+			URLs:     []string{fmt.Sprintf("oci://%s/%s:%s", server.Listener.Addr(), repository, tag)},
+			Digest:   oldDigest,
+		}
+	}
+
+	index, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), u, appv2.RepoCredential{PlainHTTP: true}, cache)
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("LoadOCIRepoIndexWithCache() = entries %v, warnings %v, error %v", index.Entries, warnings, err)
+	}
+	versions := index.Entries["demo"]
+	if len(versions) != 3 {
+		t.Fatalf("demo versions = %d, want 3", len(versions))
+	}
+	for _, version := range versions {
+		if version.Version != "2.0.0" && version.Digest != oldDigest {
+			t.Fatalf("cached version %q digest = %q, want %q", version.Version, version.Digest, oldDigest)
+		}
+	}
+	if !reflect.DeepEqual(manifestRequests, map[string]int{"2.0.0": 1}) || !reflect.DeepEqual(configRequests, map[string]int{"2.0.0": 1}) {
+		t.Fatalf("manifest requests = %v, config requests = %v; want one request for only the new tag", manifestRequests, configRequests)
 	}
 }
 
