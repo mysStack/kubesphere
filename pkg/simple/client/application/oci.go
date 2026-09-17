@@ -189,6 +189,31 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 			warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Err: fmt.Errorf("load OCI tags: %w", err)})
 			continue
 		}
+		if len(cached) == 0 && len(repoCharts) == 1 && repoChart == ociRepositoryPath(parsedURL) {
+			semanticTags := semanticOCITags(tags)
+			latestTag, found := highestOCITag(semanticTags)
+			if !found {
+				continue
+			}
+			chartVersion, digest, err := inspectOCIChart(ctx, ociRegistry, repoChart, latestTag, nil)
+			if errors.Is(err, ErrNotHelmOCIArtifact) {
+				continue
+			}
+			if err != nil {
+				warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: latestTag, Digest: digest, Err: err})
+				continue
+			}
+			for _, tag := range semanticTags {
+				version := cloneChartVersionForTag(chartVersion, tag)
+				if tag != latestTag {
+					version.Digest = ""
+				}
+				if err := index.MustAdd(version.Metadata, "", version.URLs[0], version.Digest); err != nil {
+					warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: tag, Digest: version.Digest, Err: err})
+				}
+			}
+			continue
+		}
 		for _, tag := range tags {
 			if isAuxiliaryOCITag(tag) {
 				continue
@@ -212,6 +237,40 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 	}
 	index.SortEntries()
 	return *index, warnings, nil
+}
+
+func semanticOCITags(tags []string) []string {
+	result := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		if isAuxiliaryOCITag(tag) {
+			continue
+		}
+		if _, err := semver.StrictNewVersion(strings.ReplaceAll(tag, "_", "+")); err == nil {
+			result = append(result, tag)
+		}
+	}
+	return result
+}
+
+func highestOCITag(tags []string) (string, bool) {
+	var highest *semver.Version
+	var result string
+	for _, tag := range tags {
+		version, err := semver.StrictNewVersion(strings.ReplaceAll(tag, "_", "+"))
+		if err == nil && (highest == nil || version.GreaterThan(highest)) {
+			highest, result = version, tag
+		}
+	}
+	return result, highest != nil
+}
+
+func cloneChartVersionForTag(source *helmrepo.ChartVersion, tag string) *helmrepo.ChartVersion {
+	result := *source
+	metadata := *source.Metadata
+	metadata.Version = strings.ReplaceAll(tag, "_", "+")
+	result.Metadata = &metadata
+	result.URLs = []string{source.URLs[0][:strings.LastIndex(source.URLs[0], ":")+1] + tag}
+	return &result
 }
 
 // inspectOCIChart validates Helm media types and reads only the config blob

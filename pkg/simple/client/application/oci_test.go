@@ -800,6 +800,55 @@ func TestLoadOCIRepoIndexWithCacheSkipsUnchangedConfigAndRefreshesChangedDigest(
 	}
 }
 
+func TestLoadOCIRepoIndexWithCacheDirectRepoUsesLatestMetadataForAllTags(t *testing.T) {
+	const repository = "charts/demo"
+	const latestTag = "2.0.0"
+	const latestDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	manifestRequests := 0
+	configRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/" + repository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.2.0", latestTag, "2.0.0-metadata", "not-a-version"}})
+		case "/v2/" + repository + "/manifests/" + latestTag:
+			manifestRequests++
+			w.Header().Set("Docker-Content-Digest", latestDigest)
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:config"))
+		case "/v2/" + repository + "/blobs/sha256:config":
+			configRequests++
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	index, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repository), appv2.RepoCredential{PlainHTTP: true}, nil)
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("LoadOCIRepoIndexWithCache() = entries %v, warnings %v, error %v", index.Entries, warnings, err)
+	}
+	versions := index.Entries["demo"]
+	if len(versions) != 3 {
+		t.Fatalf("demo versions = %d, want 3", len(versions))
+	}
+	for _, version := range versions {
+		if got := version.URLs[0]; got != fmt.Sprintf("oci://%s/%s:%s", server.Listener.Addr(), repository, version.Version) {
+			t.Fatalf("version URL = %q, want tag URL for %q", got, version.Version)
+		}
+		if version.Version == latestTag {
+			if version.Digest != latestDigest {
+				t.Fatalf("latest digest = %q, want %q", version.Digest, latestDigest)
+			}
+		} else if version.Digest != "" {
+			t.Fatalf("non-latest %q digest = %q, want empty", version.Version, version.Digest)
+		}
+	}
+	if manifestRequests != 1 || configRequests != 1 {
+		t.Fatalf("got %d manifest and %d config requests, want 1 each", manifestRequests, configRequests)
+	}
+}
+
 func helmOCIManifest(configDigest string) ocispec.Manifest {
 	return ocispec.Manifest{
 		Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: digest.Digest(configDigest)},
