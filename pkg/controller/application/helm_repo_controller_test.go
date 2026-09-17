@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"helm.sh/helm/v3/pkg/registry"
@@ -484,6 +485,50 @@ func TestRepoReconcilerMarksOCIRepoFailedWhenTagsCannotBeLoaded(t *testing.T) {
 	}
 	if result.RequeueAfter != 0 {
 		t.Fatalf("requeue after = %s, want 0", result.RequeueAfter)
+	}
+}
+
+func TestRepoReconcilerDoesNotLogOCIURLUserinfo(t *testing.T) {
+	const username = "fixture-user"
+	const password = "fixture-pass"
+	const chartRepo = "charts/demo"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/", "/v2":
+			w.WriteHeader(http.StatusOK)
+		case "/v2/" + chartRepo + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0"}})
+		case "/v2/" + chartRepo + "/manifests/1.0.0":
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "userinfo-oci-repo"},
+		Spec: appv2.RepoSpec{
+			Url:        "oci://" + username + ":" + password + "@" + server.Listener.Addr().String() + "/" + chartRepo,
+			Credential: appv2.RepoCredential{PlainHTTP: true},
+			SyncPeriod: ptr.To(0),
+		},
+		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	reconciler, _ := newRepoReconcilerTestClient(t, repo)
+	var logs strings.Builder
+	reconciler.logger = funcr.New(func(_, args string) { logs.WriteString(args) }, funcr.Options{})
+
+	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}})
+	if err == nil {
+		t.Fatal("Reconcile() error = nil, want invalid OCI artifact error")
+	}
+	if strings.Contains(err.Error(), username) || strings.Contains(err.Error(), password) {
+		t.Fatal("controller error exposes OCI URL userinfo")
+	}
+	logOutput := logs.String()
+	if strings.Contains(logOutput, username) || strings.Contains(logOutput, password) {
+		t.Fatal("controller log exposes OCI URL userinfo")
 	}
 }
 

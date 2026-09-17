@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/emicklei/go-restful/v3"
@@ -59,6 +60,47 @@ func TestCreateRepoDoesNotValidateIndex(t *testing.T) {
 	repo := &appv2.Repo{}
 	if err := h.client.Get(context.Background(), runtimeclient.ObjectKey{Name: "unreachable-oci-repo"}, repo); err != nil {
 		t.Fatalf("get created repo: %v", err)
+	}
+}
+
+func TestCreateOCIRepoStripsURLUserinfoBeforePersistence(t *testing.T) {
+	const username = "fixture-user"
+	const password = "fixture-pass"
+	scheme := runtime.NewScheme()
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	h := &appHandler{client: fake.NewClientBuilder().WithScheme(scheme).Build()}
+	ws := new(restful.WebService)
+	ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+	ws.Route(ws.POST("/repos").To(h.CreateOrUpdateRepo))
+	container := restful.NewContainer()
+	container.Add(ws)
+
+	body, err := json.Marshal(&appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "userinfo-oci-repo"},
+		Spec:       appv2.RepoSpec{Url: "oci://" + username + ":" + password + "@registry.example.invalid/charts/demo"},
+	})
+	if err != nil {
+		t.Fatalf("marshal repo: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/repos", bytes.NewReader(body))
+	req.Header.Set("Content-Type", restful.MIME_JSON)
+	container.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("create repo status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	repo := &appv2.Repo{}
+	if err := h.client.Get(context.Background(), runtimeclient.ObjectKey{Name: "userinfo-oci-repo"}, repo); err != nil {
+		t.Fatalf("get created repo: %v", err)
+	}
+	if repo.Spec.Url != "oci://registry.example.invalid/charts/demo" {
+		t.Fatal("persisted OCI repository URL still contains userinfo")
+	}
+	if repo.Spec.Credential.Username != username || repo.Spec.Credential.Password != password {
+		t.Fatal("persisted OCI repository credential does not match URL userinfo")
 	}
 }
 
@@ -270,6 +312,54 @@ func TestValidateOCIRepoRejectsDockerImage(t *testing.T) {
 	repo := &appv2.Repo{}
 	if err := h.client.Get(context.Background(), runtimeclient.ObjectKey{Name: "image-repo"}, repo); err == nil {
 		t.Fatal("Docker image repository was persisted during validation")
+	}
+}
+
+func TestValidateOCIRepoFailureDoesNotExposeURLUserinfo(t *testing.T) {
+	const username = "fixture-user"
+	const password = "fixture-pass"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/charts/demo/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0"}})
+		case "/v2/charts/demo/manifests/1.0.0":
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	h := &appHandler{client: fake.NewClientBuilder().WithScheme(scheme).Build()}
+	ws := new(restful.WebService)
+	ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+	ws.Route(ws.POST("/repos").To(h.CreateOrUpdateRepo))
+	container := restful.NewContainer()
+	container.Add(ws)
+	body, err := json.Marshal(&appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "invalid-userinfo-oci-repo"},
+		Spec: appv2.RepoSpec{
+			Url:        "oci://" + username + ":" + password + "@" + server.Listener.Addr().String() + "/charts/demo",
+			Credential: appv2.RepoCredential{PlainHTTP: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal repo: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/repos?validate=true", bytes.NewReader(body))
+	req.Header.Set("Content-Type", restful.MIME_JSON)
+	container.ServeHTTP(recorder, req)
+	if recorder.Code == http.StatusOK {
+		t.Fatal("validation status = 200, want failure")
+	}
+	response := recorder.Body.String()
+	if strings.Contains(response, username) || strings.Contains(response, password) {
+		t.Fatal("validation response exposes OCI URL userinfo")
 	}
 }
 

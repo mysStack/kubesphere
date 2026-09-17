@@ -540,6 +540,44 @@ func TestOCIClientsRejectInvalidTLSFilesBeforeNetworking(t *testing.T) {
 	}
 }
 
+func TestOCIHelperErrorsDoNotExposeURLUserinfo(t *testing.T) {
+	const username = "fixture-user"
+	const password = "fixture-pass"
+	rawURL := "oci://" + username + ":" + password + "@%zz/charts/demo"
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{name: "registry", call: func() error {
+			_, err := newOCIRegistry(rawURL, appv2.RepoCredential{})
+			return err
+		}},
+		{name: "registry client", call: func() error {
+			_, err := newOCIRegistryClient(rawURL, appv2.RepoCredential{})
+			return err
+		}},
+		{name: "Helm pull", call: func() error {
+			_, err := HelmPullFromOci(rawURL, appv2.RepoCredential{})
+			return err
+		}},
+		{name: "index", call: func() error {
+			_, _, err := LoadOCIRepoIndex(context.Background(), rawURL, appv2.RepoCredential{})
+			return err
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.call()
+			if err == nil {
+				t.Fatal("helper error = nil, want malformed URL error")
+			}
+			if strings.Contains(err.Error(), username) || strings.Contains(err.Error(), password) {
+				t.Fatal("helper error exposes OCI URL userinfo")
+			}
+		})
+	}
+}
+
 func TestLoadRepoIndexFromOciBuildsMetadataAndFiltersImages(t *testing.T) {
 	manifests := map[string]ocispec.Manifest{
 		"charts/traefik:1.0.0_build.1": {
@@ -844,6 +882,48 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoUsesLatestMetadataForAllTags(t *test
 	}
 }
 
+func TestLoadOCIRepoIndexWithCacheDirectRepoBootstrapsWithOnlyForeignOrStaleCache(t *testing.T) {
+	const repository = "charts/demo"
+	const latestTag = "2.0.0"
+	manifestRequests := 0
+	configRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/" + repository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", latestTag}})
+		case "/v2/" + repository + "/manifests/" + latestTag:
+			manifestRequests++
+			w.Header().Set("Docker-Content-Digest", "sha256:2222222222222222222222222222222222222222222222222222222222222222")
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:config"))
+		case "/v2/" + repository + "/blobs/sha256:config":
+			configRequests++
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	host := server.Listener.Addr().String()
+	foreign := &helmrepo.ChartVersion{Metadata: &chart.Metadata{Name: "foreign", Version: latestTag}, URLs: []string{"oci://example.invalid/charts/foreign:2.0.0"}}
+	cache := OCIChartVersionCache{
+		ociCacheKey(host, "charts/foreign", latestTag):            foreign,
+		ociCacheKey("old.example.invalid", repository, latestTag): foreign,
+		ociCacheKey(host, repository, "0.9.0"):                    foreign,
+	}
+	index, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), fmt.Sprintf("oci://%s/%s", host, repository), appv2.RepoCredential{PlainHTTP: true}, cache)
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("LoadOCIRepoIndexWithCache() error = %v, warning count = %d", err, len(warnings))
+	}
+	if got := len(index.Entries["demo"]); got != 2 {
+		t.Fatalf("demo versions = %d, want 2", got)
+	}
+	if manifestRequests != 1 || configRequests != 1 {
+		t.Fatalf("got %d manifest and %d config requests, want 1 each", manifestRequests, configRequests)
+	}
+}
+
 func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsOnlyNewTags(t *testing.T) {
 	const repository = "charts/demo"
 	const oldDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -893,6 +973,46 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsOnlyNewTags(t *testing.T) {
 	}
 	if !reflect.DeepEqual(manifestRequests, map[string]int{"2.0.0": 1}) || !reflect.DeepEqual(configRequests, map[string]int{"2.0.0": 1}) {
 		t.Fatalf("manifest requests = %v, config requests = %v; want one request for only the new tag", manifestRequests, configRequests)
+	}
+}
+
+func TestLoadOCIRepoIndexWithCacheDirectRepoWarnsForNewNonHelmTag(t *testing.T) {
+	const repository = "charts/demo"
+	const oldTag = "1.0.0"
+	const newTag = "2.0.0"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/" + repository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {oldTag, newTag}})
+		case "/v2/" + repository + "/manifests/" + newTag:
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}})
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	host := server.Listener.Addr().String()
+	cache := OCIChartVersionCache{
+		ociCacheKey(host, repository, oldTag): {
+			Metadata: &chart.Metadata{Name: "demo", Version: oldTag},
+			URLs:     []string{fmt.Sprintf("oci://%s/%s:%s", host, repository, oldTag)},
+		},
+	}
+	index, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), fmt.Sprintf("oci://%s/%s", host, repository), appv2.RepoCredential{PlainHTTP: true}, cache)
+	if err != nil {
+		t.Fatalf("LoadOCIRepoIndexWithCache() error = %v", err)
+	}
+	if got := len(index.Entries["demo"]); got != 1 {
+		t.Fatalf("cached demo versions = %d, want 1", got)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warning count = %d, want 1", len(warnings))
+	}
+	var warning *OCIIndexWarning
+	if !errors.As(warnings[0], &warning) || warning.Tag != newTag || !errors.Is(warning, ErrNotHelmOCIArtifact) {
+		t.Fatalf("warning = %#v, want OCIIndexWarning for the new non-Helm tag", warnings[0])
 	}
 }
 
