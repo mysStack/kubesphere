@@ -211,32 +211,30 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 			continue
 		}
 		directRepository := len(repoCharts) == 1 && repoChart == ociRepositoryPath(parsedURL)
-		currentCachedTag := false
 		if directRepository {
-			for _, tag := range semanticOCITags(tags) {
-				if cached[ociCacheKey(parsedURL.Host, repoChart, tag)] != nil {
-					currentCachedTag = true
-					break
-				}
-			}
-		}
-		if directRepository && !currentCachedTag {
 			semanticTags := semanticOCITags(tags)
 			latestTag, found := highestOCITag(semanticTags)
 			if !found {
 				continue
 			}
-			chartVersion, digest, err := inspectOCIChart(ctx, ociRegistry, repoChart, latestTag, nil)
-			if errors.Is(err, ErrNotHelmOCIArtifact) {
-				continue
-			}
-			if err != nil {
-				warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: latestTag, Digest: digest, Err: err})
-				continue
+			template := cached[ociCacheKey(parsedURL.Host, repoChart, latestTag)]
+			if template == nil {
+				var digest string
+				template, digest, err = inspectOCIChart(ctx, ociRegistry, repoChart, latestTag, nil)
+				if err != nil {
+					warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: latestTag, Digest: digest, Err: err})
+				}
 			}
 			for _, tag := range semanticTags {
+				chartVersion := cached[ociCacheKey(parsedURL.Host, repoChart, tag)]
+				if chartVersion == nil {
+					chartVersion = template
+				}
+				if chartVersion == nil {
+					continue
+				}
 				version := cloneChartVersionForTag(chartVersion, tag)
-				if tag != latestTag {
+				if tag != latestTag && cached[ociCacheKey(parsedURL.Host, repoChart, tag)] == nil {
 					version.Digest = ""
 				}
 				if err := index.MustAdd(version.Metadata, "", version.URLs[0], version.Digest); err != nil {

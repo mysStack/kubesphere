@@ -930,7 +930,7 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoBootstrapsWithOnlyForeignOrStaleCach
 	}
 }
 
-func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsOnlyNewTags(t *testing.T) {
+func TestLoadOCIRepoIndexWithCacheDirectRepoUsesLatestMetadataForMissingTags(t *testing.T) {
 	const repository = "charts/demo"
 	const oldDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	const newDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -939,7 +939,7 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsOnlyNewTags(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/" + repository + "/tags/list":
-			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.2.0", "2.0.0"}})
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.2.0", "1.3.0", "2.0.0"}})
 		case "/v2/" + repository + "/manifests/2.0.0":
 			manifestRequests["2.0.0"]++
 			w.Header().Set("Docker-Content-Digest", newDigest)
@@ -969,16 +969,19 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsOnlyNewTags(t *testing.T) {
 		t.Fatalf("LoadOCIRepoIndexWithCache() = entries %v, warnings %v, error %v", index.Entries, warnings, err)
 	}
 	versions := index.Entries["demo"]
-	if len(versions) != 3 {
-		t.Fatalf("demo versions = %d, want 3", len(versions))
+	if len(versions) != 4 {
+		t.Fatalf("demo versions = %d, want 4", len(versions))
 	}
 	for _, version := range versions {
-		if version.Version != "2.0.0" && version.Digest != oldDigest {
+		if version.Version == "1.3.0" && version.Digest != "" {
+			t.Fatalf("new historical version digest = %q, want empty", version.Digest)
+		}
+		if (version.Version == "1.0.0" || version.Version == "1.2.0") && version.Digest != oldDigest {
 			t.Fatalf("cached version %q digest = %q, want %q", version.Version, version.Digest, oldDigest)
 		}
 	}
 	if !reflect.DeepEqual(manifestRequests, map[string]int{"2.0.0": 1}) || !reflect.DeepEqual(configRequests, map[string]int{"2.0.0": 1}) {
-		t.Fatalf("manifest requests = %v, config requests = %v; want one request for only the new tag", manifestRequests, configRequests)
+		t.Fatalf("manifest requests = %v, config requests = %v; want one request for only the latest tag", manifestRequests, configRequests)
 	}
 }
 
