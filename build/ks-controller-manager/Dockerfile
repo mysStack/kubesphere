@@ -10,8 +10,8 @@ ADD . /workspace/
 
 RUN KUBE_BUILD_PLATFORMS="${TARGETOS}/${TARGETARCH}" make ks-controller-manager && \
     mkdir -p /workspace/_output/bin && \
-    cp "/workspace/_output/local/bin/${TARGETOS}/${TARGETARCH}/ks-controller-manager" \
-       /workspace/_output/bin/ks-controller-manager
+    target="/workspace/_output/local/bin/${TARGETOS}/${TARGETARCH}/ks-controller-manager" && \
+    if [ "$target" -ef /workspace/_output/bin/ks-controller-manager ]; then :; else cp "$target" /workspace/_output/bin/ks-controller-manager; fi
 # RUN curl -LO https://github.com/kubesphere/telemetry/releases/download/v${TELEMETRY_VERSION}/telemetry_${TELEMETRY_VERSION}_linux_${TARGETARCH}.tar.gz && \
 #     tar -zxvf telemetry_${TELEMETRY_VERSION}_linux_${TARGETARCH}.tar.gz -C /workspace/_output/bin telemetry
 
