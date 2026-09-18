@@ -51,7 +51,8 @@
 
 - [x] tag 列表作为第一步，manifest/metadata 查询采用批量、并发上限和超时控制。
 - [x] 建立按 Repo、tag 的 OCI metadata 缓存，并保留已同步版本的 manifest digest，避免每次定时同步全量重新拉取。
-- [x] 对新增 tag 和已缓存版本执行增量同步；删除或失效 tag 不影响已有 ApplicationVersion，除非明确执行清理策略。
+- [x] 对新增 tag 和已缓存版本执行增量同步。
+- [ ] 明确删除或失效 tag 的清理策略：当前无 warning 的完整索引会删除缺失的 ApplicationVersion；仅产生 warning 的部分 OCI 同步会保留既有版本。
 - [x] 辅助 Artifact 在 tag 过滤阶段跳过，manifest 校验失败只记录单版本警告，不阻塞其他版本。
 - [x] 为 429、5xx、超时实现有限次数重试和退避；认证错误、TLS 错误、404 不重复重试。
 - [ ] 将同步并发、批大小、请求超时、缓存 TTL 和重试次数配置化，并设置安全默认值。
