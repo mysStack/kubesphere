@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"helm.sh/helm/v3/pkg/registry"
 	helmrepo "helm.sh/helm/v3/pkg/repo"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -113,9 +114,17 @@ func (r *RepoReconciler) UpdateStatus(ctx context.Context, helmRepo *appv2.Repo)
 	return nil
 }
 
+func (r *RepoReconciler) failRepoSync(ctx context.Context, helmRepo *appv2.Repo, syncErr error) error {
+	helmRepo.Status.State = appv2.StatusFailed
+	if err := r.UpdateStatus(ctx, helmRepo); err != nil {
+		return fmt.Errorf("%w; update failed repo status: %v", syncErr, err)
+	}
+	return syncErr
+}
+
 func (r *RepoReconciler) skipSync(helmRepo *appv2.Repo) (bool, error) {
 	logger := r.logger.WithValues("repo", helmRepo.Name)
-	if helmRepo.Status.State == appv2.StatusManualTrigger || helmRepo.Status.State == appv2.StatusSyncing {
+	if helmRepo.Status.State == appv2.StatusCreated || helmRepo.Status.State == appv2.StatusManualTrigger || helmRepo.Status.State == appv2.StatusSyncing {
 		logger.V(4).Info(fmt.Sprintf("repo state: %s", helmRepo.Status.State))
 		return false, nil
 	}
@@ -204,10 +213,9 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		return reconcile.Result{}, err
 	}
 
-	index, err := application.LoadRepoIndex(helmRepo.Spec.Url, helmRepo.Spec.Credential)
-	if err != nil {
-		logger.Error(err, "load index failed", "url", helmRepo.Spec.Url)
-		return reconcile.Result{}, err
+	credential := helmRepo.Spec.Credential
+	if err := application.LoadRepoCredentialSecret(ctx, r.Client, helmRepo.Spec.CredentialSecretRef, &credential); err != nil {
+		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 	}
 
 	appList := &appv2.ApplicationList{}
@@ -217,7 +225,34 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	err = r.Client.List(ctx, appList, &opts)
 	if err != nil {
 		logger.Error(err, "list application failed")
-		return reconcile.Result{}, err
+		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+	}
+
+	var index helmrepo.IndexFile
+	var indexWarnings []error
+	repoURL := helmRepo.Spec.Url
+	if registry.IsOCI(helmRepo.Spec.Url) {
+		repoURL = application.SanitizeOCIURL(repoURL)
+		appVersionList := &appv2.ApplicationVersionList{}
+		if err = r.Client.List(ctx, appVersionList, &opts); err != nil {
+			logger.Error(err, "list application versions failed")
+			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+		}
+		cached := application.BuildOCIChartVersionCache(appList.Items, appVersionList.Items)
+		index, indexWarnings, err = application.LoadOCIRepoIndexWithCache(ctx, repoURL, credential, cached)
+		if err == nil && len(index.Entries) == 0 {
+			err = fmt.Errorf("no valid OCI Helm charts found at %s", repoURL)
+		}
+	} else {
+		index, err = application.LoadRepoIndex(repoURL, credential)
+	}
+	if err != nil {
+		logger.Error(err, "load index failed", "url", repoURL)
+		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+	}
+	for _, warning := range indexWarnings {
+		logger.Info("skipped OCI artifact during repository sync", "warning", warning)
+		r.recorder.Eventf(helmRepo, corev1.EventTypeWarning, "OCIIndexWarning", "%v", warning)
 	}
 	indexMap := make(map[string]struct{})
 	for appName := range index.Entries {
@@ -225,13 +260,32 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		key := fmt.Sprintf("%s-%s", helmRepo.Name, shortName)
 		indexMap[key] = struct{}{}
 	}
-	for _, i := range appList.Items {
-		if _, exists := indexMap[i.Name]; !exists {
-			logger.V(4).Info("application has been removed from the repo", "application", i.Name)
-			err = r.Client.Delete(ctx, &i)
-			if err != nil {
-				logger.Error(err, "delete application failed", "application", i.Name)
-				return reconcile.Result{}, err
+	allowDeletion := len(indexWarnings) == 0
+	if allowDeletion {
+		for _, i := range appList.Items {
+			if _, exists := indexMap[i.Name]; !exists {
+				logger.V(4).Info("application has been removed from the repo", "application", i.Name)
+				err = r.Client.Delete(ctx, &i)
+				if err != nil {
+					logger.Error(err, "delete application failed", "application", i.Name)
+					return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+				}
+			}
+		}
+		appVersionList := &appv2.ApplicationVersionList{}
+		if err = r.Client.List(ctx, appVersionList, &opts); err != nil {
+			logger.Error(err, "list application versions failed")
+			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+		}
+		for _, version := range appVersionList.Items {
+			appID := version.Labels[appv2.AppIDLabelKey]
+			if _, exists := indexMap[appID]; exists {
+				continue
+			}
+			logger.V(4).Info("application version has been removed from the repo", "application version", version.Name)
+			if err = r.Client.Delete(ctx, &version); err != nil {
+				logger.Error(err, "delete application version failed", "application version", version.Name)
+				return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 			}
 		}
 	}
@@ -244,10 +298,10 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 
 		versions = filterVersions(versions)
 
-		vRequests, err := r.repoParseRequest(ctx, versions, helmRepo, appName, appList)
+		vRequests, err := r.repoParseRequest(ctx, versions, helmRepo, appName, appList, allowDeletion)
 		if err != nil {
 			logger.Error(err, "parse request failed")
-			return reconcile.Result{}, err
+			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 		}
 		if len(vRequests) == 0 {
 			continue
@@ -263,7 +317,7 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		}
 		if err = application.CreateOrUpdateApp(r.Client, vRequests, r.cmStore, r.ossStore, own); err != nil {
 			logger.Error(err, "create or update app failed")
-			return reconcile.Result{}, err
+			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 		}
 	}
 
@@ -279,7 +333,7 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	return reconcile.Result{RequeueAfter: requeueAfter}, nil
 }
 
-func (r *RepoReconciler) repoParseRequest(ctx context.Context, versions helmrepo.ChartVersions, helmRepo *appv2.Repo, appName string, appList *appv2.ApplicationList) (createOrUpdateList []application.AppRequest, err error) {
+func (r *RepoReconciler) repoParseRequest(ctx context.Context, versions helmrepo.ChartVersions, helmRepo *appv2.Repo, appName string, appList *appv2.ApplicationList, allowDeletion bool) (createOrUpdateList []application.AppRequest, err error) {
 	appVersionList := &appv2.ApplicationVersionList{}
 
 	logger := r.logger.WithValues("repo", helmRepo.Name)
@@ -310,11 +364,13 @@ func (r *RepoReconciler) repoParseRequest(ctx context.Context, versions helmrepo
 		key := fmt.Sprintf("%s-%s", i.GetLabels()[appv2.AppIDLabelKey], LegalVersion)
 		_, exists := versionMap[key]
 		if !exists {
-			logger.V(4).Info("delete application version", "application version", i.GetName())
-			err = r.Client.Delete(ctx, &i)
-			if err != nil {
-				logger.Error(err, "delete application version failed")
-				return nil, err
+			if allowDeletion {
+				logger.V(4).Info("delete application version", "application version", i.GetName())
+				err = r.Client.Delete(ctx, &i)
+				if err != nil {
+					logger.Error(err, "delete application version failed")
+					return nil, err
+				}
 			}
 		} else {
 			appVersionDigestMap[key] = i.Spec.Digest
@@ -325,8 +381,8 @@ func (r *RepoReconciler) repoParseRequest(ctx context.Context, versions helmrepo
 		legalVersion = application.FormatVersion(ver.Version)
 		shortName = application.GenerateShortNameMD5Hash(ver.Name)
 		key := fmt.Sprintf("%s-%s-%s", helmRepo.Name, shortName, legalVersion)
-		dig := appVersionDigestMap[key]
-		if dig == ver.Digest {
+		dig, exists := appVersionDigestMap[key]
+		if exists && (ver.Digest == "" || dig == ver.Digest) {
 			continue
 		}
 		if dig != "" {

@@ -12,11 +12,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"time"
 
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/pkg/registry"
 	"oras.land/oras-go/pkg/registry/remote"
 	"oras.land/oras-go/pkg/registry/remote/auth"
@@ -36,6 +40,7 @@ type Registry struct {
 	password              string
 	timeout               time.Duration
 	insecureSkipVerifyTLS bool
+	tlsClientConfig       *tls.Config
 }
 
 func NewRegistry(name string, options ...RegistryOption) (*Registry, error) {
@@ -58,7 +63,7 @@ func NewRegistry(name string, options ...RegistryOption) (*Registry, error) {
 	reg.Client = &auth.Client{
 		Client: &http.Client{
 			Timeout:   reg.timeout,
-			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: reg.insecureSkipVerifyTLS}},
+			Transport: &http.Transport{TLSClientConfig: reg.tlsConfig(), Proxy: http.ProxyFromEnvironment},
 		},
 		Header: headers,
 		Credential: func(_ context.Context, _ string) (auth.Credential, error) {
@@ -73,12 +78,14 @@ func NewRegistry(name string, options ...RegistryOption) (*Registry, error) {
 		},
 	}
 
-	_, err := reg.IsPlainHttp()
-	if err != nil {
-		return nil, err
-	}
-
 	return reg, nil
+}
+
+func (r *Registry) tlsConfig() *tls.Config {
+	if r.tlsClientConfig != nil {
+		return r.tlsClientConfig.Clone()
+	}
+	return &tls.Config{InsecureSkipVerify: r.insecureSkipVerifyTLS}
 }
 
 func WithBasicAuth(username, password string) RegistryOption {
@@ -97,6 +104,19 @@ func WithTimeout(timeout time.Duration) RegistryOption {
 func WithInsecureSkipVerifyTLS(insecureSkipVerifyTLS bool) RegistryOption {
 	return func(reg *Registry) {
 		reg.insecureSkipVerifyTLS = insecureSkipVerifyTLS
+	}
+}
+
+// WithTLSClientConfig configures CA roots and client certificates for registry requests.
+func WithTLSClientConfig(config *tls.Config) RegistryOption {
+	return func(reg *Registry) {
+		reg.tlsClientConfig = config
+	}
+}
+
+func WithPlainHTTP() RegistryOption {
+	return func(reg *Registry) {
+		reg.PlainHTTP = true
 	}
 }
 
@@ -212,6 +232,121 @@ func (r *Registry) Repository(ctx context.Context, name string) (registry.Reposi
 	repo := r.repository((*remote.Repository)(&r.RepositoryOptions))
 	repo.Reference = ref
 	return repo, nil
+}
+
+// FetchManifest returns the OCI manifest for a tag without downloading its layers.
+func (r *Registry) FetchManifest(ctx context.Context, repository, tag string) (ocispec.Manifest, error) {
+	var manifest ocispec.Manifest
+	ref := registry.Reference{Registry: r.Reference.Registry, Repository: repository, Reference: tag}
+	if err := ref.ValidateReference(); err != nil {
+		return manifest, err
+	}
+
+	u := url.URL{
+		Scheme: buildScheme(r.PlainHTTP),
+		Host:   r.Reference.Host(),
+		Path:   fmt.Sprintf("/v2/%s/manifests/%s", repository, tag),
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return manifest, err
+	}
+	req.Header.Set("Accept", ocispec.MediaTypeImageManifest)
+	resp, err := r.do(req)
+	if err != nil {
+		return manifest, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return manifest, ParseErrorResponse(resp)
+	}
+	if err := json.NewDecoder(limitReader(resp.Body, r.MaxMetadataBytes)).Decode(&manifest); err != nil {
+		return manifest, err
+	}
+	return manifest, nil
+}
+
+// FetchManifestDescriptor returns the OCI manifest and its registry digest for a tag.
+func (r *Registry) FetchManifestDescriptor(ctx context.Context, repository, tag string) (ocispec.Manifest, string, error) {
+	var manifest ocispec.Manifest
+	ref := registry.Reference{Registry: r.Reference.Registry, Repository: repository, Reference: tag}
+	if err := ref.ValidateReference(); err != nil {
+		return manifest, "", err
+	}
+
+	u := url.URL{
+		Scheme: buildScheme(r.PlainHTTP),
+		Host:   r.Reference.Host(),
+		Path:   fmt.Sprintf("/v2/%s/manifests/%s", repository, tag),
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return manifest, "", err
+	}
+	req.Header.Set("Accept", ocispec.MediaTypeImageManifest)
+	resp, err := r.do(req)
+	if err != nil {
+		return manifest, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return manifest, "", ParseErrorResponse(resp)
+	}
+	body, err := readBounded(resp.Body, r.MaxMetadataBytes)
+	if err != nil {
+		return manifest, "", err
+	}
+	manifestDigest := resp.Header.Get("Docker-Content-Digest")
+	if parsed, err := digest.Parse(manifestDigest); err == nil {
+		manifestDigest = parsed.String()
+	} else {
+		manifestDigest = digest.FromBytes(body).String()
+	}
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return manifest, manifestDigest, err
+	}
+	return manifest, manifestDigest, nil
+}
+
+// FetchBlob downloads a single blob referenced by an OCI manifest.
+func (r *Registry) FetchBlob(ctx context.Context, repository string, desc ocispec.Descriptor) ([]byte, error) {
+	ref := registry.Reference{Registry: r.Reference.Registry, Repository: repository}
+	if err := ref.ValidateRepository(); err != nil {
+		return nil, err
+	}
+
+	u := url.URL{
+		Scheme: buildScheme(r.PlainHTTP),
+		Host:   r.Reference.Host(),
+		Path:   fmt.Sprintf("/v2/%s/blobs/%s", repository, desc.Digest),
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := r.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, ParseErrorResponse(resp)
+	}
+	return readBounded(resp.Body, r.MaxMetadataBytes)
+}
+
+func readBounded(reader io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxMetadataBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("response exceeds maximum size of %d bytes", maxBytes)
+	}
+	return data, nil
 }
 
 func (r *Registry) repository(repo *remote.Repository) *remote.Repository {

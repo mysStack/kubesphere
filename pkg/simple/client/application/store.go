@@ -152,10 +152,14 @@ func DownLoadChart(cli runtimeclient.Client, pullUrl, repoName string) (data []b
 		klog.Errorf("failed to get app repo, err: %v", err)
 		return data, err
 	}
-	if registry.IsOCI(pullUrl) {
-		return HelmPullFromOci(pullUrl, repo.Spec.Credential)
+	credential := repo.Spec.Credential
+	if err := LoadRepoCredentialSecret(context.TODO(), cli, repo.Spec.CredentialSecretRef, &credential); err != nil {
+		return data, err
 	}
-	buf, err := HelmPull(pullUrl, repo.Spec.Credential)
+	if registry.IsOCI(pullUrl) {
+		return HelmPullFromOci(pullUrl, credential)
+	}
+	buf, err := HelmPull(pullUrl, credential)
 	if err != nil {
 		klog.Errorf("load chart failed, error: %s", err)
 		return data, err

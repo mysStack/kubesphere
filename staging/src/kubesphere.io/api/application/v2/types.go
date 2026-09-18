@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"kubesphere.io/api/constants"
@@ -277,14 +278,17 @@ type RepoCredential struct {
 	CAFile string `json:"caFile,omitempty"`
 	// skip tls certificate checks for the repository, default is ture
 	InsecureSkipTLSVerify *bool `json:"insecureSkipTLSVerify,omitempty"`
+	// force plain HTTP for OCI registries
+	PlainHTTP bool `json:"plainHTTP,omitempty"`
 }
 
 // RepoSpec defines the desired state of Repo
 type RepoSpec struct {
-	Url         string         `json:"url"`
-	Credential  RepoCredential `json:"credential,omitempty"`
-	Description string         `json:"description,omitempty"`
-	SyncPeriod  *int           `json:"syncPeriod"`
+	Url                 string                  `json:"url"`
+	Credential          RepoCredential          `json:"credential,omitempty"`
+	CredentialSecretRef *corev1.SecretReference `json:"credentialSecretRef,omitempty"`
+	Description         string                  `json:"description,omitempty"`
+	SyncPeriod          *int                    `json:"syncPeriod"`
 }
 
 // RepoStatus defines the observed state of Repo

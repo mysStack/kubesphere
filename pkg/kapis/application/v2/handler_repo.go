@@ -7,9 +7,11 @@
 package v2
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 
+	"helm.sh/helm/v3/pkg/registry"
 	k8suitl "kubesphere.io/kubesphere/pkg/utils/k8sutil"
 
 	"kubesphere.io/kubesphere/pkg/simple/client/application"
@@ -47,7 +49,12 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 	}
 
 	parsedUrl, err := url.Parse(repoRequest.Spec.Url)
-	if requestDone(err, resp) {
+	if err != nil {
+		if registry.IsOCI(repoRequest.Spec.Url) {
+			requestDone(fmt.Errorf("invalid repository URL"), resp)
+		} else {
+			requestDone(err, resp)
+		}
 		return
 	}
 
@@ -55,16 +62,36 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 		repoRequest.Spec.Credential.Username = parsedUrl.User.Username()
 		repoRequest.Spec.Credential.Password, _ = parsedUrl.User.Password()
 	}
-
-	_, err = application.LoadRepoIndex(repoRequest.Spec.Url, repoRequest.Spec.Credential)
-	if requestDone(err, resp) {
-		return
+	if registry.IsOCI(repoRequest.Spec.Url) {
+		parsedUrl.User = nil
+		repoRequest.Spec.Url = parsedUrl.String()
 	}
 
 	if req.QueryParameter("validate") != "" {
+		credential := repoRequest.Spec.Credential
+		if err = h.loadRepoCredentialSecret(req.Request.Context(), repoRequest.Spec.CredentialSecretRef, &credential); requestDone(err, resp) {
+			return
+		}
+		if registry.IsOCI(repoRequest.Spec.Url) {
+			err = application.ValidateOCIRepository(repoRequest.Spec.Url, credential)
+		} else {
+			_, err = application.LoadRepoIndex(repoRequest.Spec.Url, credential)
+		}
+		if requestDone(err, resp) {
+			return
+		}
 		data := map[string]any{"ok": true}
 		resp.WriteAsJson(data)
 		return
+	}
+	if !registry.IsOCI(repoRequest.Spec.Url) {
+		credential := repoRequest.Spec.Credential
+		if err = h.loadRepoCredentialSecret(req.Request.Context(), repoRequest.Spec.CredentialSecretRef, &credential); requestDone(err, resp) {
+			return
+		}
+		if _, err = application.LoadRepoIndexFromHTTP(repoRequest.Spec.Url, credential); requestDone(err, resp) {
+			return
+		}
 	}
 
 	repo := &appv2.Repo{}
@@ -75,13 +102,11 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 
 	mutateFn := func() error {
 		repo.Spec = appv2.RepoSpec{
-			Url:         parsedUrl.String(),
-			SyncPeriod:  repoRequest.Spec.SyncPeriod,
-			Description: stringutils.ShortenString(repoRequest.Spec.Description, 512),
-		}
-		if parsedUrl.User != nil {
-			repo.Spec.Credential.Username = parsedUrl.User.Username()
-			repo.Spec.Credential.Password, _ = parsedUrl.User.Password()
+			Url:                 parsedUrl.String(),
+			Credential:          repoRequest.Spec.Credential,
+			CredentialSecretRef: repoRequest.Spec.CredentialSecretRef,
+			SyncPeriod:          repoRequest.Spec.SyncPeriod,
+			Description:         stringutils.ShortenString(repoRequest.Spec.Description, 512),
 		}
 		if repo.GetLabels() == nil {
 			repo.SetLabels(map[string]string{})
@@ -104,6 +129,10 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 	data := map[string]interface{}{"repo_id": repoId}
 
 	resp.WriteAsJson(data)
+}
+
+func (h *appHandler) loadRepoCredentialSecret(ctx context.Context, ref *v1.SecretReference, credential *appv2.RepoCredential) error {
+	return application.LoadRepoCredentialSecret(ctx, h.client, ref, credential)
 }
 
 func (h *appHandler) DeleteRepo(req *restful.Request, resp *restful.Response) {
