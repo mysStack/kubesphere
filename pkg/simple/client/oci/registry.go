@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/opencontainers/go-digest"
@@ -22,6 +24,42 @@ import (
 
 type RepositoryOptions remote.Repository
 type RegistryOption func(*Registry)
+
+const retryAttempts = 3
+
+var retryDelays = []time.Duration{200 * time.Millisecond, 500 * time.Millisecond}
+
+// registryResponseError preserves registry response details for callers that
+// need to distinguish transient responses from permanent failures.
+type registryResponseError struct {
+	StatusCode int
+	RetryAfter *time.Duration
+	err        error
+}
+
+func (e *registryResponseError) Error() string {
+	return e.err.Error()
+}
+
+func (e *registryResponseError) Unwrap() error {
+	return e.err
+}
+
+type retryClient struct {
+	client remote.Client
+}
+
+func (c retryClient) Do(req *http.Request) (*http.Response, error) {
+	resp, err := retry(req.Context(), retryAttempts, func() (*http.Response, error) {
+		return c.client.Do(req)
+	})
+	if err != nil || resp == nil || resp.StatusCode < http.StatusBadRequest {
+		return resp, err
+	}
+	err = newRegistryResponseError(resp)
+	resp.Body.Close()
+	return nil, err
+}
 
 // Registry is an HTTP client to a remote registry by oras-go 2.x.
 // Registry with authentication requires an administrator account.
@@ -125,6 +163,106 @@ func (r *Registry) do(req *http.Request) (*http.Response, error) {
 	return r.client().Do(req)
 }
 
+func (r *Registry) doWithRetry(req *http.Request) (*http.Response, error) {
+	return retry(req.Context(), retryAttempts, func() (*http.Response, error) {
+		return r.do(req)
+	})
+}
+
+func retry(ctx context.Context, attempts int, operation func() (*http.Response, error)) (*http.Response, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	for attempt := 0; attempt < attempts; attempt++ {
+		resp, err := operation()
+		if !isRetryableResponse(resp) && !isRetryableTransportError(err) {
+			return resp, err
+		}
+		if attempt == attempts-1 {
+			return resp, err
+		}
+
+		delay := retryDelay(resp, attempt)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		if err := waitForRetry(ctx, delay); err != nil {
+			return nil, err
+		}
+	}
+
+	return nil, nil
+}
+
+func isRetryableResponse(resp *http.Response) bool {
+	return resp != nil && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError)
+}
+
+func isRetryableTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func retryDelay(resp *http.Response, attempt int) time.Duration {
+	if resp != nil {
+		if retryAfter, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); ok {
+			return retryAfter
+		}
+	}
+	if attempt < len(retryDelays) {
+		return retryDelays[attempt]
+	}
+	return retryDelays[len(retryDelays)-1]
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second, true
+	}
+	if retryAt, err := http.ParseTime(value); err == nil {
+		return max(retryAt.Sub(now), 0), true
+	}
+	return 0, false
+}
+
+func newRegistryResponseError(resp *http.Response) error {
+	retryAfter, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	var parsedRetryAfter *time.Duration
+	if ok {
+		parsedRetryAfter = &retryAfter
+	}
+	return &registryResponseError{
+		StatusCode: resp.StatusCode,
+		RetryAfter: parsedRetryAfter,
+		err:        ParseErrorResponse(resp),
+	}
+}
+
 func (r *Registry) IsPlainHttp() (bool, error) {
 	schemaProbeList := []bool{false, true}
 
@@ -147,7 +285,7 @@ func (r *Registry) Ping(ctx context.Context) error {
 		return err
 	}
 
-	resp, err := r.do(req)
+	resp, err := r.doWithRetry(req)
 	if err != nil {
 		return err
 	}
@@ -159,7 +297,7 @@ func (r *Registry) Ping(ctx context.Context) error {
 	case http.StatusNotFound:
 		return errors.New("not found")
 	default:
-		return ParseErrorResponse(resp)
+		return newRegistryResponseError(resp)
 	}
 }
 
@@ -192,14 +330,14 @@ func (r *Registry) repositories(ctx context.Context, last string, fn func(repos 
 		}
 		req.URL.RawQuery = q.Encode()
 	}
-	resp, err := r.do(req)
+	resp, err := r.doWithRetry(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", ParseErrorResponse(resp)
+		return "", newRegistryResponseError(resp)
 	}
 	var page struct {
 		Repositories []string `json:"repositories"`
@@ -246,13 +384,13 @@ func (r *Registry) FetchManifest(ctx context.Context, repository, tag string) (o
 		return manifest, err
 	}
 	req.Header.Set("Accept", ocispec.MediaTypeImageManifest)
-	resp, err := r.do(req)
+	resp, err := r.doWithRetry(req)
 	if err != nil {
 		return manifest, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return manifest, ParseErrorResponse(resp)
+		return manifest, newRegistryResponseError(resp)
 	}
 	if err := json.NewDecoder(limitReader(resp.Body, r.MaxMetadataBytes)).Decode(&manifest); err != nil {
 		return manifest, err
@@ -278,13 +416,13 @@ func (r *Registry) FetchManifestDescriptor(ctx context.Context, repository, tag 
 		return manifest, "", err
 	}
 	req.Header.Set("Accept", ocispec.MediaTypeImageManifest)
-	resp, err := r.do(req)
+	resp, err := r.doWithRetry(req)
 	if err != nil {
 		return manifest, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return manifest, "", ParseErrorResponse(resp)
+		return manifest, "", newRegistryResponseError(resp)
 	}
 	body, err := readBounded(resp.Body, r.MaxMetadataBytes)
 	if err != nil {
@@ -318,13 +456,13 @@ func (r *Registry) FetchBlob(ctx context.Context, repository string, desc ocispe
 	if err != nil {
 		return nil, err
 	}
-	resp, err := r.do(req)
+	resp, err := r.doWithRetry(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, ParseErrorResponse(resp)
+		return nil, newRegistryResponseError(resp)
 	}
 	return readBounded(resp.Body, r.MaxMetadataBytes)
 }
@@ -345,7 +483,7 @@ func readBounded(reader io.Reader, maxBytes int64) ([]byte, error) {
 
 func (r *Registry) repository(repo *remote.Repository) *remote.Repository {
 	return &remote.Repository{
-		Client:               repo.Client,
+		Client:               retryClient{client: r.client()},
 		Reference:            repo.Reference,
 		PlainHTTP:            repo.PlainHTTP,
 		ManifestMediaTypes:   slices.Clone(repo.ManifestMediaTypes),
