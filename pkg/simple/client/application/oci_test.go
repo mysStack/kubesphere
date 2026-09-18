@@ -25,6 +25,7 @@ import (
 	"path"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -789,6 +790,69 @@ func TestLoadOCIRepoIndexSkipsAuxiliaryAndInvalidTagsBeforeManifestRequests(t *t
 	}
 	if !reflect.DeepEqual(manifestRequests, map[string]int{"1.0.0": 1}) {
 		t.Fatalf("manifest requests = %v", manifestRequests)
+	}
+}
+
+func TestLoadOCIRepoIndexWithCacheSkipsCachedTagMetadataRequests(t *testing.T) {
+	const repository = "charts/demo"
+	const cachedTag = "1.0.0"
+	const newTag = "2.0.0"
+	var cachedManifestRequests atomic.Int32
+	var cachedConfigRequests atomic.Int32
+	var newManifestRequests atomic.Int32
+	var newConfigRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/_catalog":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"repositories": {repository}})
+		case "/v2/" + repository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {cachedTag, newTag, "2.0.0-metadata"}})
+		case "/v2/" + repository + "/manifests/" + cachedTag:
+			cachedManifestRequests.Add(1)
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:cached-config"))
+		case "/v2/" + repository + "/blobs/sha256:cached-config":
+			cachedConfigRequests.Add(1)
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"1.0.0"}`))
+		case "/v2/" + repository + "/manifests/" + newTag:
+			newManifestRequests.Add(1)
+			w.Header().Set("Docker-Content-Digest", "sha256:2222222222222222222222222222222222222222222222222222222222222222")
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:new-config"))
+		case "/v2/" + repository + "/blobs/sha256:new-config":
+			newConfigRequests.Add(1)
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	host := server.Listener.Addr().String()
+	cache := OCIChartVersionCache{
+		ociCacheKey(host, repository, cachedTag): {
+			Metadata: &chart.Metadata{Name: "demo", Version: cachedTag},
+			URLs:     []string{fmt.Sprintf("oci://%s/%s:%s", host, repository, cachedTag)},
+			Digest:   "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		},
+	}
+	index, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), fmt.Sprintf("oci://%s", host), appv2.RepoCredential{PlainHTTP: true}, cache)
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("LoadOCIRepoIndexWithCache() = entries %v, warnings %v, error %v", index.Entries, warnings, err)
+	}
+	if got := len(index.Entries["demo"]); got != 2 {
+		t.Fatalf("demo versions = %d, want 2", got)
+	}
+	if got := cachedManifestRequests.Load(); got != 0 {
+		t.Fatalf("cached manifest requests = %d, want 0", got)
+	}
+	if got := cachedConfigRequests.Load(); got != 0 {
+		t.Fatalf("cached config requests = %d, want 0", got)
+	}
+	if got := newManifestRequests.Load(); got != 1 {
+		t.Fatalf("new manifest requests = %d, want 1", got)
+	}
+	if got := newConfigRequests.Load(); got != 1 {
+		t.Fatalf("new config requests = %d, want 1", got)
 	}
 }
 
