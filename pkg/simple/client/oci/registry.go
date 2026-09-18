@@ -202,7 +202,7 @@ func retry(ctx context.Context, attempts int, operation func() (*http.Response, 
 }
 
 func isRetryableResponse(resp *http.Response) bool {
-	return resp != nil && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError)
+	return resp != nil && (resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= http.StatusInternalServerError && resp.StatusCode <= 599))
 }
 
 func isRetryableTransportError(err error) bool {
