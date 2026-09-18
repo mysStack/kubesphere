@@ -31,11 +31,19 @@
 - [x] OCI 支持直接 Chart 仓库和 Registry catalog 子仓库发现。
 - [x] OCI 请求超时、TLS、Basic Auth、Client Certificate、Plain HTTP 测试覆盖。
 - [x] Console 增加“立即同步”入口，后端同步保持异步执行。
-- [~] 前后端个人镜像 Action 已配置；仍需在测试环境完成镜像构建和部署验证。
+- [x] 前后端个人镜像 Action 已配置，并完成测试环境构建和部署验证。
 - [ ] 扩展 Repo 状态：同步开始时间、结束时间、耗时、版本数量、缓存命中数、最近错误。
 - [ ] 为 OCI 失败场景补充可读的 Status Reason、Kubernetes Event 和 Console 错误展示。
 
 验收标准：添加、验证、手动同步 OCI 仓库不阻塞 API；有效 Chart 能出现在商店并可部署；辅助 Artifact 不造成失败；失败时能区分超时、429、认证、无效 Chart 和 Registry 不可达。
+
+阶段一验证记录（2026-09-18）：
+
+- 后端测试镜像：`oci-repo-20260918-d466650`，已部署 `ks-apiserver` 和 `ks-controller-manager`。
+- 前端测试镜像：`oci-repo-20260918-b890df5`，已部署 `ks-console`。
+- 前端 Action 已成功同时推送 Docker Hub 和 GHCR 镜像，构建记录：[Build Personal Console Image](https://github.com/mysStack/console/actions/runs/35314311819)。
+- 测试环境 `ks-console` Deployment 已滚动更新至前端测试镜像，Pod 为 `1/1 Running`，NodePort 根路径返回 HTTP 200。
+- Console“立即同步”已完成异步触发验证；OCI 全量缓存、增量同步、限流退避和详细进度状态仍属于阶段二、三，尚未标记完成。
 
 ## 阶段二：OCI 性能、缓存和限流
 
