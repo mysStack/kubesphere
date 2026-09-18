@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/emicklei/go-restful/v3"
@@ -138,6 +139,57 @@ func TestCreateHTTPRepoValidatesIndex(t *testing.T) {
 	}
 }
 
+func TestValidateHTTPRepoLoadsIndexWithoutOCIRequests(t *testing.T) {
+	indexRequests := 0
+	ociRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/charts/index.yaml":
+			indexRequests++
+			_, _ = w.Write([]byte("apiVersion: v1\nentries: {}\n"))
+		default:
+			if r.URL.Path == "/v2" || strings.HasPrefix(r.URL.Path, "/v2/") {
+				ociRequests++
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	scheme := runtime.NewScheme()
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	h := &appHandler{client: fake.NewClientBuilder().WithScheme(scheme).Build()}
+	ws := new(restful.WebService)
+	ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+	ws.Route(ws.POST("/repos").To(h.CreateOrUpdateRepo))
+	container := restful.NewContainer()
+	container.Add(ws)
+
+	body, err := json.Marshal(&appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "validated-http-repo"},
+		Spec:       appv2.RepoSpec{Url: server.URL + "/charts"},
+	})
+	if err != nil {
+		t.Fatalf("marshal repo: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/repos?validate=1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", restful.MIME_JSON)
+	container.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("validate repo status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if indexRequests != 1 {
+		t.Fatalf("index requests = %d, want 1", indexRequests)
+	}
+	if ociRequests != 0 {
+		t.Fatalf("OCI requests = %d, want 0", ociRequests)
+	}
+}
+
 func TestValidateOCIRepoReadsHelmMetadata(t *testing.T) {
 	metadata, err := json.Marshal(chart.Metadata{APIVersion: "v2", Name: "demo", Version: "2.0.0"})
 	if err != nil {
@@ -197,7 +249,7 @@ func TestValidateOCIRepoReadsHelmMetadata(t *testing.T) {
 	}
 }
 
-func TestValidateOCIRepoChecksOnlyHighestTag(t *testing.T) {
+func TestValidateOCIRepoChecksAllTags(t *testing.T) {
 	metadata, err := json.Marshal(chart.Metadata{APIVersion: "v2", Name: "demo", Version: "3.0.0"})
 	if err != nil {
 		t.Fatalf("marshal chart metadata: %v", err)
@@ -211,20 +263,20 @@ func TestValidateOCIRepoChecksOnlyHighestTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal OCI manifest: %v", err)
 	}
-	manifestRequests := 0
-	configRequests := 0
+	var manifestRequests atomic.Int32
+	var configRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/", "/v2":
 			w.WriteHeader(http.StatusOK)
 		case "/v2/charts/demo/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "2.0.0", "3.0.0"}})
-		case "/v2/charts/demo/manifests/3.0.0":
-			manifestRequests++
+		case "/v2/charts/demo/manifests/1.0.0", "/v2/charts/demo/manifests/2.0.0", "/v2/charts/demo/manifests/3.0.0":
+			manifestRequests.Add(1)
 			w.Header().Set("Content-Type", ocispec.MediaTypeImageManifest)
 			_, _ = w.Write(manifest)
 		case "/v2/charts/demo/blobs/" + configDigest.String():
-			configRequests++
+			configRequests.Add(1)
 			_, _ = w.Write(metadata)
 		default:
 			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
@@ -258,8 +310,8 @@ func TestValidateOCIRepoChecksOnlyHighestTag(t *testing.T) {
 	if err := h.client.Get(context.Background(), runtimeclient.ObjectKey{Name: "fast-validated-oci-repo"}, repo); err == nil {
 		t.Fatal("OCI repository was persisted during validation")
 	}
-	if manifestRequests != 1 || configRequests != 1 {
-		t.Fatalf("got %d manifest and %d config requests, want 1 each", manifestRequests, configRequests)
+	if manifestRequests.Load() != 3 || configRequests.Load() != 3 {
+		t.Fatalf("got %d manifest and %d config requests, want 3 each", manifestRequests.Load(), configRequests.Load())
 	}
 }
 

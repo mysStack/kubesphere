@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -633,8 +634,8 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 
 func TestRepoReconcilerDirectOCIReusesExistingVersionsWithoutManifestRequests(t *testing.T) {
 	const chartRepo = "charts/demo"
-	manifestRequests := 0
-	configRequests := 0
+	var manifestRequests atomic.Int32
+	var configRequests atomic.Int32
 	allowArtifactRequests := true
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -642,13 +643,13 @@ func TestRepoReconcilerDirectOCIReusesExistingVersionsWithoutManifestRequests(t 
 			w.WriteHeader(http.StatusOK)
 		case "/v2/" + chartRepo + "/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "2.0.0"}})
-		case "/v2/" + chartRepo + "/manifests/2.0.0":
+		case "/v2/" + chartRepo + "/manifests/1.0.0", "/v2/" + chartRepo + "/manifests/2.0.0":
 			if !allowArtifactRequests {
 				t.Errorf("unexpected manifest request during second reconcile")
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			manifestRequests++
+			manifestRequests.Add(1)
 			w.Header().Set("Docker-Content-Digest", "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
 			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: digest.FromString("direct-config")}, Layers: []ocispec.Descriptor{{MediaType: registry.ChartLayerMediaType}}})
 		case "/v2/" + chartRepo + "/blobs/" + digest.FromString("direct-config").String():
@@ -657,7 +658,7 @@ func TestRepoReconcilerDirectOCIReusesExistingVersionsWithoutManifestRequests(t 
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			configRequests++
+			configRequests.Add(1)
 			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -692,8 +693,8 @@ func TestRepoReconcilerDirectOCIReusesExistingVersionsWithoutManifestRequests(t 
 	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
 		t.Fatalf("second Reconcile() error = %v", err)
 	}
-	if manifestRequests != 1 || configRequests != 1 {
-		t.Fatalf("manifest requests = %d, config requests = %d; want one each from the initial reconcile", manifestRequests, configRequests)
+	if manifestRequests.Load() != 2 || configRequests.Load() != 2 {
+		t.Fatalf("manifest requests = %d, config requests = %d; want two each from the initial reconcile", manifestRequests.Load(), configRequests.Load())
 	}
 }
 
@@ -794,11 +795,8 @@ func TestRepoReconcilerCreatesAllFastIndexedOCIChartVersions(t *testing.T) {
 		t.Fatalf("application version count = %d, want 3", got)
 	}
 	for _, version := range versions.Items {
-		if version.Spec.VersionName == "3.0.0" && version.Spec.Digest == "" {
-			t.Errorf("latest application version %s has empty digest", version.Name)
-		}
-		if version.Spec.VersionName != "3.0.0" && version.Spec.Digest != "" {
-			t.Errorf("historical application version %s digest = %q, want empty", version.Name, version.Spec.Digest)
+		if version.Spec.Digest != "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" {
+			t.Errorf("application version %s digest = %q, want manifest digest", version.Name, version.Spec.Digest)
 		}
 	}
 }
