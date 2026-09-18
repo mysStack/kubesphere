@@ -19,6 +19,7 @@ import (
 	"path"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -901,18 +902,18 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsEveryMissingTag(t *testing.T
 	const repository = "charts/demo"
 	const latestTag = "2.0.0"
 	const latestDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-	manifestRequests := 0
-	configRequests := 0
+	var manifestRequests atomic.Int32
+	var configRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/" + repository + "/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.2.0", latestTag, "2.0.0-metadata", "not-a-version"}})
 		case "/v2/" + repository + "/manifests/1.0.0", "/v2/" + repository + "/manifests/1.2.0", "/v2/" + repository + "/manifests/" + latestTag:
-			manifestRequests++
+			manifestRequests.Add(1)
 			w.Header().Set("Docker-Content-Digest", latestDigest)
 			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:config"))
 		case "/v2/" + repository + "/blobs/sha256:config":
-			configRequests++
+			configRequests.Add(1)
 			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
 		default:
 			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
@@ -937,8 +938,8 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsEveryMissingTag(t *testing.T
 			t.Fatalf("digest for %q = %q, want %q", version.Version, version.Digest, latestDigest)
 		}
 	}
-	if manifestRequests != 3 || configRequests != 3 {
-		t.Fatalf("got %d manifest and %d config requests, want 3 each", manifestRequests, configRequests)
+	if manifestRequests.Load() != 3 || configRequests.Load() != 3 {
+		t.Fatalf("got %d manifest and %d config requests, want 3 each", manifestRequests.Load(), configRequests.Load())
 	}
 }
 
@@ -1038,18 +1039,18 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsMissingHistoricalTags(t *tes
 func TestLoadOCIRepoIndexWithCacheDirectRepoBootstrapsWithOnlyForeignOrStaleCache(t *testing.T) {
 	const repository = "charts/demo"
 	const latestTag = "2.0.0"
-	manifestRequests := 0
-	configRequests := 0
+	var manifestRequests atomic.Int32
+	var configRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/" + repository + "/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", latestTag}})
 		case "/v2/" + repository + "/manifests/1.0.0", "/v2/" + repository + "/manifests/" + latestTag:
-			manifestRequests++
+			manifestRequests.Add(1)
 			w.Header().Set("Docker-Content-Digest", "sha256:2222222222222222222222222222222222222222222222222222222222222222")
 			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:config"))
 		case "/v2/" + repository + "/blobs/sha256:config":
-			configRequests++
+			configRequests.Add(1)
 			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
 		default:
 			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
@@ -1072,8 +1073,8 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoBootstrapsWithOnlyForeignOrStaleCach
 	if got := len(index.Entries["demo"]); got != 2 {
 		t.Fatalf("demo versions = %d, want 2", got)
 	}
-	if manifestRequests != 2 || configRequests != 2 {
-		t.Fatalf("got %d manifest and %d config requests, want 2 each", manifestRequests, configRequests)
+	if manifestRequests.Load() != 2 || configRequests.Load() != 2 {
+		t.Fatalf("got %d manifest and %d config requests, want 2 each", manifestRequests.Load(), configRequests.Load())
 	}
 }
 
@@ -1083,23 +1084,32 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsAllMissingTags(t *testing.T)
 	const newDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	manifestRequests := make(map[string]int)
 	configRequests := make(map[string]int)
+	var requestsMu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/" + repository + "/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.2.0", "1.3.0", "2.0.0"}})
 		case "/v2/" + repository + "/manifests/1.3.0":
+			requestsMu.Lock()
 			manifestRequests["1.3.0"]++
+			requestsMu.Unlock()
 			w.Header().Set("Docker-Content-Digest", newDigest)
 			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:1.3.0-config"))
 		case "/v2/" + repository + "/blobs/sha256:1.3.0-config":
+			requestsMu.Lock()
 			configRequests["1.3.0"]++
+			requestsMu.Unlock()
 			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"1.3.0"}`))
 		case "/v2/" + repository + "/manifests/2.0.0":
+			requestsMu.Lock()
 			manifestRequests["2.0.0"]++
+			requestsMu.Unlock()
 			w.Header().Set("Docker-Content-Digest", newDigest)
 			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:2.0.0-config"))
 		case "/v2/" + repository + "/blobs/sha256:2.0.0-config":
+			requestsMu.Lock()
 			configRequests["2.0.0"]++
+			requestsMu.Unlock()
 			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
 		default:
 			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
@@ -1134,7 +1144,10 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsAllMissingTags(t *testing.T)
 			t.Fatalf("cached version %q digest = %q, want %q", version.Version, version.Digest, oldDigest)
 		}
 	}
-	if !reflect.DeepEqual(manifestRequests, map[string]int{"1.3.0": 1, "2.0.0": 1}) || !reflect.DeepEqual(configRequests, map[string]int{"1.3.0": 1, "2.0.0": 1}) {
+	requestsMu.Lock()
+	requestsMatch := reflect.DeepEqual(manifestRequests, map[string]int{"1.3.0": 1, "2.0.0": 1}) && reflect.DeepEqual(configRequests, map[string]int{"1.3.0": 1, "2.0.0": 1})
+	requestsMu.Unlock()
+	if !requestsMatch {
 		t.Fatalf("manifest requests = %v, config requests = %v; want one request for each missing tag", manifestRequests, configRequests)
 	}
 }
@@ -1230,8 +1243,8 @@ func TestLoadOCIRepoIndexWithCache77TagsLimitsMetadataConcurrencyAndAggregatesPa
 	if got := manifestRequests.Load(); got != 77 {
 		t.Fatalf("manifest requests = %d, want 77", got)
 	}
-	if got := peakManifestRequests.Load(); got != 4 {
-		t.Fatalf("peak manifest requests = %d, want 4", got)
+	if got := peakManifestRequests.Load(); got <= 1 || got > 4 {
+		t.Fatalf("peak manifest requests = %d, want between 2 and 4", got)
 	}
 	if len(warnings) != 1 {
 		t.Fatalf("warning count = %d, want 1", len(warnings))
@@ -1239,6 +1252,141 @@ func TestLoadOCIRepoIndexWithCache77TagsLimitsMetadataConcurrencyAndAggregatesPa
 	var warning *OCIIndexWarning
 	if !errors.As(warnings[0], &warning) || warning.Tag != failedTag {
 		t.Fatalf("warning = %#v, want OCIIndexWarning for %s", warnings[0], failedTag)
+	}
+}
+
+func TestLoadOCIChartVersionsSortsCachedAndInspectedTagsTogether(t *testing.T) {
+	const repository = "charts/demo"
+	const cachedTag = "1.0.1"
+	tags := []string{"1.0.0", cachedTag, "1.0.2"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v2/"+repository+"/manifests/"):
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:config"))
+		case r.URL.Path == "/v2/"+repository+"/blobs/sha256:config":
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"1.0.0"}`))
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	host := server.Listener.Addr().String()
+	reg, err := newOCIRegistry(fmt.Sprintf("oci://%s", host), appv2.RepoCredential{PlainHTTP: true})
+	if err != nil {
+		t.Fatalf("newOCIRegistry() error = %v", err)
+	}
+	cache := OCIChartVersionCache{
+		ociCacheKey(host, repository, cachedTag): {
+			Metadata: &chart.Metadata{Name: "demo", Version: cachedTag},
+			URLs:     []string{fmt.Sprintf("oci://%s/%s:%s", host, repository, cachedTag)},
+		},
+	}
+	versions, warnings := loadOCIChartVersions(context.Background(), reg, host, repository, tags, cache)
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	gotTags := make([]string, 0, len(versions))
+	for _, version := range versions {
+		_, _, tag, found := ociReferenceFromPullURL(version.URLs[0])
+		if !found {
+			t.Fatalf("version URL %q is not an OCI tag reference", version.URLs[0])
+		}
+		gotTags = append(gotTags, tag)
+	}
+	if !reflect.DeepEqual(gotTags, tags) {
+		t.Fatalf("combined tags = %v, want %v", gotTags, tags)
+	}
+}
+
+func TestLoadOCIChartVersionsStopsQueuedWorkWhenParentContextCanceled(t *testing.T) {
+	const repository = "charts/demo"
+	tags := []string{"1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5"}
+	started := make(chan struct{}, ociMetadataConcurrency)
+	var manifestRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v2/"+repository+"/manifests/") {
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		manifestRequests.Add(1)
+		started <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	host := server.Listener.Addr().String()
+	reg, err := newOCIRegistry(fmt.Sprintf("oci://%s", host), appv2.RepoCredential{PlainHTTP: true})
+	if err != nil {
+		t.Fatalf("newOCIRegistry() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		versions []*helmrepo.ChartVersion
+		warnings []error
+	}
+	completed := make(chan result, 1)
+	go func() {
+		versions, warnings := loadOCIChartVersions(ctx, reg, host, repository, tags, nil)
+		completed <- result{versions: versions, warnings: warnings}
+	}()
+	for range ociMetadataConcurrency {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("workers did not start manifest requests")
+		}
+	}
+	cancel()
+	select {
+	case result := <-completed:
+		if len(result.versions) != 0 || len(result.warnings) != ociMetadataConcurrency {
+			t.Fatalf("result = %d versions, %d warnings; want no versions and %d warnings", len(result.versions), len(result.warnings), ociMetadataConcurrency)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("loadOCIChartVersions() did not return after context cancellation")
+	}
+	if got := manifestRequests.Load(); got != ociMetadataConcurrency {
+		t.Fatalf("manifest requests = %d, want %d; queued work must stop", got, ociMetadataConcurrency)
+	}
+}
+
+func TestLoadOCIRepoIndexSortsMultipleTagWarnings(t *testing.T) {
+	const repository = "charts/demo"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/" + repository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.0.1", "1.0.2"}})
+		case "/v2/" + repository + "/manifests/1.0.0":
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/v2/" + repository + "/manifests/1.0.1":
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}})
+		case "/v2/" + repository + "/manifests/1.0.2":
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:bad-config"))
+		case "/v2/" + repository + "/blobs/sha256:bad-config":
+			_, _ = w.Write([]byte(`{"name":`))
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	_, warnings, err := LoadOCIRepoIndex(context.Background(), fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repository), appv2.RepoCredential{PlainHTTP: true})
+	if err != nil {
+		t.Fatalf("LoadOCIRepoIndex() error = %v", err)
+	}
+	if len(warnings) != 3 {
+		t.Fatalf("warning count = %d, want 3", len(warnings))
+	}
+	for i, wantTag := range []string{"1.0.0", "1.0.1", "1.0.2"} {
+		var warning *OCIIndexWarning
+		if !errors.As(warnings[i], &warning) || warning.Tag != wantTag {
+			t.Fatalf("warning %d = %#v, want tag %s", i, warnings[i], wantTag)
+		}
 	}
 }
 

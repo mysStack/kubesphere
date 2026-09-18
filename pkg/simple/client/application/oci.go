@@ -27,9 +27,8 @@ import (
 )
 
 const (
-	ociRequestTimeout        = 30 * time.Second
-	ociMetadataConcurrency   = 4
-	ociMetadataRetryAttempts = 2
+	ociRequestTimeout      = 30 * time.Second
+	ociMetadataConcurrency = 4
 )
 
 // ErrNotHelmOCIArtifact indicates that an OCI manifest is not a Helm chart.
@@ -211,13 +210,13 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 			continue
 		}
 		directRepository := len(repoCharts) == 1 && repoChart == ociRepositoryPath(parsedURL)
-		cachedVersions, inspectedVersions, inspectionWarnings := loadOCIChartVersions(ctx, ociRegistry, parsedURL.Host, repoChart, semanticOCITags(tags), cached)
+		chartVersions, inspectionWarnings := loadOCIChartVersions(ctx, ociRegistry, parsedURL.Host, repoChart, semanticOCITags(tags), cached)
 		for _, warning := range inspectionWarnings {
 			if directRepository || !errors.Is(warning, ErrNotHelmOCIArtifact) {
 				warnings = append(warnings, warning)
 			}
 		}
-		for _, chartVersion := range append(cachedVersions, inspectedVersions...) {
+		for _, chartVersion := range chartVersions {
 			if err := index.MustAdd(chartVersion.Metadata, "", chartVersion.URLs[0], chartVersion.Digest); err != nil {
 				warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: chartVersion.Version, Digest: chartVersion.Digest, Err: err})
 			}
@@ -228,19 +227,19 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 }
 
 // loadOCIChartVersions adds cached versions without metadata requests and inspects only uncached tags.
-func loadOCIChartVersions(ctx context.Context, reg *oci.Registry, host, repository string, tags []string, cached OCIChartVersionCache) (cachedVersions, inspectedVersions []*helmrepo.ChartVersion, warnings []error) {
+func loadOCIChartVersions(ctx context.Context, reg *oci.Registry, host, repository string, tags []string, cached OCIChartVersionCache) (versions []*helmrepo.ChartVersion, warnings []error) {
 	tags = append([]string(nil), tags...)
 	sort.Strings(tags)
 	missingTags := make([]string, 0, len(tags))
 	for _, tag := range tags {
 		if version := cached[ociCacheKey(host, repository, tag)]; version != nil {
-			cachedVersions = append(cachedVersions, cloneChartVersionForTag(version, tag))
+			versions = append(versions, cloneChartVersionForTag(version, tag))
 			continue
 		}
 		missingTags = append(missingTags, tag)
 	}
 	if len(missingTags) == 0 {
-		return cachedVersions, nil, nil
+		return versions, nil
 	}
 
 	type inspectionResult struct {
@@ -296,9 +295,22 @@ func loadOCIChartVersions(ctx context.Context, reg *oci.Registry, host, reposito
 			warnings = append(warnings, &OCIIndexWarning{Repository: repository, Tag: result.tag, Digest: result.digest, Err: result.err})
 			continue
 		}
-		inspectedVersions = append(inspectedVersions, result.version)
+		versions = append(versions, result.version)
 	}
-	return cachedVersions, inspectedVersions, warnings
+	sort.Slice(versions, func(i, j int) bool {
+		return ociChartVersionTag(versions[i]) < ociChartVersionTag(versions[j])
+	})
+	return versions, warnings
+}
+
+func ociChartVersionTag(version *helmrepo.ChartVersion) string {
+	if len(version.URLs) > 0 {
+		_, _, tag, found := ociReferenceFromPullURL(version.URLs[0])
+		if found {
+			return tag
+		}
+	}
+	return version.Version
 }
 
 func semanticOCITags(tags []string) []string {
