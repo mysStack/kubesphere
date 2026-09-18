@@ -7,13 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       source_ref:
-        description: Git branch, tag, or commit SHA to build
-        required: true
-        default: master
+        description: Optional branch, tag, or commit SHA; defaults to the branch selected in Actions
+        required: false
         type: string
       tag:
-        description: Image tag to publish
-        required: true
+        description: Base image tag (defaults to oci-repo for test builds)
+        required: false
+        default: oci-repo
         type: string
 
 permissions:
@@ -24,13 +24,17 @@ jobs:
   build:
     name: Build and publish images
     runs-on: ubuntu-latest
-    env:
-      IMAGE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.sha }}
+          ref: ${{ inputs.source_ref || github.ref }}
+
+      - name: Generate image tag
+        id: image_tag
+        env:
+          BASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: echo "value=${BASE_TAG}-$(TZ=Asia/Shanghai date +%Y%m%d)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -61,8 +65,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            docker.io/mingys/ks-apiserver:${{ env.IMAGE_TAG }}
-            ghcr.io/mysstack/ks-apiserver:${{ env.IMAGE_TAG }}
+            docker.io/mingys/ks-apiserver:${{ steps.image_tag.outputs.value }}
+            ghcr.io/mysstack/ks-apiserver:${{ steps.image_tag.outputs.value }}
 
       - name: Build and publish ks-controller-manager
         uses: docker/build-push-action@v6
@@ -72,5 +76,5 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            docker.io/mingys/ks-controller-manager:${{ env.IMAGE_TAG }}
-            ghcr.io/mysstack/ks-controller-manager:${{ env.IMAGE_TAG }}
+            docker.io/mingys/ks-controller-manager:${{ steps.image_tag.outputs.value }}
+            ghcr.io/mysstack/ks-controller-manager:${{ steps.image_tag.outputs.value }}
