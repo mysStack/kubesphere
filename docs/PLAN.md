@@ -49,14 +49,16 @@
 
 目标：在保留全量版本能力的同时，减少 Registry 请求，避免 Docker Hub 等公共 Registry 限流。
 
-- [ ] tag 列表作为第一步，manifest/metadata 查询采用批量、并发上限和超时控制。
-- [ ] 建立按 Repo、tag、digest 的 OCI metadata 缓存，避免每次定时同步全量重新拉取。
-- [ ] 对新增 tag、digest 变化和已缓存版本执行增量同步；删除或失效 tag 不影响已有 ApplicationVersion，除非明确执行清理策略。
-- [ ] 辅助 Artifact 在 tag 过滤阶段跳过，manifest 校验失败只记录单版本警告，不阻塞其他版本。
-- [ ] 为 429、5xx、超时实现有限次数重试和退避；认证错误、TLS 错误、404 不重复重试。
+- [x] tag 列表作为第一步，manifest/metadata 查询采用批量、并发上限和超时控制。
+- [x] 建立按 Repo、tag 的 OCI metadata 缓存，并保留已同步版本的 manifest digest，避免每次定时同步全量重新拉取。
+- [x] 对新增 tag 和已缓存版本执行增量同步；删除或失效 tag 不影响已有 ApplicationVersion，除非明确执行清理策略。
+- [x] 辅助 Artifact 在 tag 过滤阶段跳过，manifest 校验失败只记录单版本警告，不阻塞其他版本。
+- [x] 为 429、5xx、超时实现有限次数重试和退避；认证错误、TLS 错误、404 不重复重试。
 - [ ] 将同步并发、批大小、请求超时、缓存 TTL 和重试次数配置化，并设置安全默认值。
 - [ ] 增加仓库健康信息：远端版本数、有效 Chart 数、跳过数、失败数、请求数、最近同步耗时。
-- [ ] 增加离线 Registry Mock 测试：77 个版本、metadata Artifact、429、慢响应、重复 digest、部分失败。
+- [x] 增加离线 Registry Mock 测试：77 个版本、metadata Artifact、429、慢响应、重复 digest、部分失败。
+
+当前默认值：metadata 请求并发上限为 4、单次请求超时 30 秒；429/5xx/超时最多尝试 3 次，退避为 200ms、500ms，并优先遵循 `Retry-After`。默认同步假定 OCI tag 不可变，已缓存 tag 不会重新拉取 manifest；需要重新校验旧 tag 时，应通过后续显式刷新操作触发。
 
 验收标准：重复同步主要命中缓存；同一 Registry 多仓库不会无限并发；429 不导致整个 Repo 进入不可恢复状态；同步结果可解释、可重试、可观测。
 
