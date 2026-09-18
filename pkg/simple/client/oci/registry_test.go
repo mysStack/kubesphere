@@ -10,16 +10,128 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
+
+func TestFetchManifestDescriptorRetriesRetryableStatus(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+	}{
+		{name: "too many requests", status: http.StatusTooManyRequests},
+		{name: "service unavailable", status: http.StatusServiceUnavailable},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				if tt.status == http.StatusTooManyRequests {
+					w.Header().Set("Retry-After", "0")
+				}
+				w.WriteHeader(tt.status)
+			}))
+			defer server.Close()
+
+			reg := newTestRegistry(t, server)
+			_, _, err := reg.FetchManifestDescriptor(context.Background(), "charts/example", "1.0.0")
+			if err == nil {
+				t.Fatalf("FetchManifestDescriptor() error = nil, want status %d error", tt.status)
+			}
+			if requests != 3 {
+				t.Fatalf("requests = %d, want 3", requests)
+			}
+			var responseErr *registryResponseError
+			if !errors.As(err, &responseErr) {
+				t.Fatalf("FetchManifestDescriptor() error = %T, want registryResponseError", err)
+			}
+			if responseErr.StatusCode != tt.status {
+				t.Fatalf("status code = %d, want %d", responseErr.StatusCode, tt.status)
+			}
+			if tt.status == http.StatusTooManyRequests && (responseErr.RetryAfter == nil || *responseErr.RetryAfter != 0) {
+				t.Fatalf("RetryAfter = %v, want 0", responseErr.RetryAfter)
+			}
+		})
+	}
+}
+
+func TestFetchManifestDescriptorDoesNotRetryPermanentStatus(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized},
+		{name: "not found", status: http.StatusNotFound},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				w.WriteHeader(tt.status)
+			}))
+			defer server.Close()
+
+			reg := newTestRegistry(t, server)
+			_, _, err := reg.FetchManifestDescriptor(context.Background(), "charts/example", "1.0.0")
+			if err == nil {
+				t.Fatalf("FetchManifestDescriptor() error = nil, want status %d error", tt.status)
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want 1", requests)
+			}
+		})
+	}
+}
+
+func TestFetchManifestDescriptorRetryAfterZeroDoesNotDelay(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", ocispec.MediaTypeImageManifest)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+
+	reg := newTestRegistry(t, server)
+	started := time.Now()
+	_, _, err := reg.FetchManifestDescriptor(context.Background(), "charts/example", "1.0.0")
+	if err != nil {
+		t.Fatalf("FetchManifestDescriptor() error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
+		t.Fatalf("Retry-After: 0 delayed request for %s", elapsed)
+	}
+}
+
+func newTestRegistry(t *testing.T, server *httptest.Server) *Registry {
+	t.Helper()
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	reg, err := NewRegistry(serverURL.Host, WithPlainHTTP())
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	return reg
+}
 
 func TestFetchManifestDescriptorComputesDigestWhenHeaderMissing(t *testing.T) {
 	body := []byte(`{"schemaVersion":2,"config":{"mediaType":"application/vnd.example.config.v1+json","digest":"sha256:config","size":7}}`)
