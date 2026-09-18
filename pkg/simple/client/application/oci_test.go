@@ -1185,6 +1185,69 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoWarnsForNewNonHelmTag(t *testing.T) 
 	}
 }
 
+func TestLoadOCIRepoIndexWithCache77TagsLimitsMetadataConcurrencyAndAggregatesPartialFailures(t *testing.T) {
+	const repository = "charts/demo"
+	const failedTag = "1.0.76"
+	tags := make([]string, 77)
+	for i := range tags {
+		tags[i] = fmt.Sprintf("1.0.%d", i)
+	}
+
+	var activeManifestRequests atomic.Int32
+	var peakManifestRequests atomic.Int32
+	var manifestRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v2/"+repository+"/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": tags})
+		case strings.HasPrefix(r.URL.Path, "/v2/"+repository+"/manifests/"):
+			tag := path.Base(r.URL.Path)
+			manifestRequests.Add(1)
+			if tag == failedTag {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			active := activeManifestRequests.Add(1)
+			for {
+				peak := peakManifestRequests.Load()
+				if active <= peak || peakManifestRequests.CompareAndSwap(peak, active) {
+					break
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+			activeManifestRequests.Add(-1)
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:config-" + tag))
+		case strings.HasPrefix(r.URL.Path, "/v2/"+repository+"/blobs/sha256:config-"):
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"1.0.0"}`))
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	index, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repository), appv2.RepoCredential{PlainHTTP: true}, nil)
+	if err != nil {
+		t.Fatalf("LoadOCIRepoIndexWithCache() error = %v", err)
+	}
+	if got := len(index.Entries["demo"]); got != 76 {
+		t.Fatalf("demo versions = %d, want 76", got)
+	}
+	if got := manifestRequests.Load(); got != 77 {
+		t.Fatalf("manifest requests = %d, want 77", got)
+	}
+	if got := peakManifestRequests.Load(); got != 4 {
+		t.Fatalf("peak manifest requests = %d, want 4", got)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warning count = %d, want 1", len(warnings))
+	}
+	var warning *OCIIndexWarning
+	if !errors.As(warnings[0], &warning) || warning.Tag != failedTag {
+		t.Fatalf("warning = %#v, want OCIIndexWarning for %s", warnings[0], failedTag)
+	}
+}
+
 func helmOCIManifest(configDigest string) ocispec.Manifest {
 	return ocispec.Manifest{
 		Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: digest.Digest(configDigest)},
