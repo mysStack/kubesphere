@@ -903,7 +903,7 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoReusesCachedVersionWithoutManifestRe
 	}
 }
 
-func TestLoadOCIRepoIndexWithCacheDirectRepoUsesLatestMetadataForAllTags(t *testing.T) {
+func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsEveryMissingTag(t *testing.T) {
 	const repository = "charts/demo"
 	const latestTag = "2.0.0"
 	const latestDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -913,7 +913,7 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoUsesLatestMetadataForAllTags(t *test
 		switch r.URL.Path {
 		case "/v2/" + repository + "/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.2.0", latestTag, "2.0.0-metadata", "not-a-version"}})
-		case "/v2/" + repository + "/manifests/" + latestTag:
+		case "/v2/" + repository + "/manifests/1.0.0", "/v2/" + repository + "/manifests/1.2.0", "/v2/" + repository + "/manifests/" + latestTag:
 			manifestRequests++
 			w.Header().Set("Docker-Content-Digest", latestDigest)
 			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:config"))
@@ -939,16 +939,105 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoUsesLatestMetadataForAllTags(t *test
 		if got := version.URLs[0]; got != fmt.Sprintf("oci://%s/%s:%s", server.Listener.Addr(), repository, version.Version) {
 			t.Fatalf("version URL = %q, want tag URL for %q", got, version.Version)
 		}
-		if version.Version == latestTag {
-			if version.Digest != latestDigest {
-				t.Fatalf("latest digest = %q, want %q", version.Digest, latestDigest)
-			}
-		} else if version.Digest != "" {
-			t.Fatalf("non-latest %q digest = %q, want empty", version.Version, version.Digest)
+		if version.Digest != latestDigest {
+			t.Fatalf("digest for %q = %q, want %q", version.Version, version.Digest, latestDigest)
 		}
 	}
-	if manifestRequests != 1 || configRequests != 1 {
-		t.Fatalf("got %d manifest and %d config requests, want 1 each", manifestRequests, configRequests)
+	if manifestRequests != 3 || configRequests != 3 {
+		t.Fatalf("got %d manifest and %d config requests, want 3 each", manifestRequests, configRequests)
+	}
+}
+
+func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsMissingHistoricalTags(t *testing.T) {
+	const repository = "charts/demo"
+	const latestTag = "2.0.0"
+	var cachedManifestRequests atomic.Int32
+	var cachedConfigRequests atomic.Int32
+	var firstHistoricalManifestRequests atomic.Int32
+	var firstHistoricalConfigRequests atomic.Int32
+	var secondHistoricalManifestRequests atomic.Int32
+	var secondHistoricalConfigRequests atomic.Int32
+	var invalidManifestRequests atomic.Int32
+	var invalidConfigRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/" + repository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.1.0", "1.2.0", latestTag, "2.0.0-metadata"}})
+		case "/v2/" + repository + "/manifests/" + latestTag:
+			cachedManifestRequests.Add(1)
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:cached-config"))
+		case "/v2/" + repository + "/blobs/sha256:cached-config":
+			cachedConfigRequests.Add(1)
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
+		case "/v2/" + repository + "/manifests/1.0.0":
+			firstHistoricalManifestRequests.Add(1)
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:first-historical-config"))
+		case "/v2/" + repository + "/blobs/sha256:first-historical-config":
+			firstHistoricalConfigRequests.Add(1)
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"1.0.0"}`))
+		case "/v2/" + repository + "/manifests/1.1.0":
+			secondHistoricalManifestRequests.Add(1)
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:second-historical-config"))
+		case "/v2/" + repository + "/blobs/sha256:second-historical-config":
+			secondHistoricalConfigRequests.Add(1)
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"1.1.0"}`))
+		case "/v2/" + repository + "/manifests/1.2.0":
+			invalidManifestRequests.Add(1)
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}})
+		case "/v2/" + repository + "/blobs/sha256:invalid-config":
+			invalidConfigRequests.Add(1)
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	host := server.Listener.Addr().String()
+	cache := OCIChartVersionCache{
+		ociCacheKey(host, repository, latestTag): {
+			Metadata: &chart.Metadata{Name: "demo", Version: latestTag},
+			URLs:     []string{fmt.Sprintf("oci://%s/%s:%s", host, repository, latestTag)},
+			Digest:   "sha256:cached",
+		},
+	}
+	index, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), fmt.Sprintf("oci://%s/%s", host, repository), appv2.RepoCredential{PlainHTTP: true}, cache)
+	if err != nil {
+		t.Fatalf("LoadOCIRepoIndexWithCache() error = %v", err)
+	}
+	if got := len(index.Entries["demo"]); got != 3 {
+		t.Fatalf("demo versions = %d, want 3", got)
+	}
+	if got := cachedManifestRequests.Load(); got != 0 {
+		t.Fatalf("cached manifest requests = %d, want 0", got)
+	}
+	if got := cachedConfigRequests.Load(); got != 0 {
+		t.Fatalf("cached config requests = %d, want 0", got)
+	}
+	if got := firstHistoricalManifestRequests.Load(); got != 1 {
+		t.Fatalf("first historical manifest requests = %d, want 1", got)
+	}
+	if got := firstHistoricalConfigRequests.Load(); got != 1 {
+		t.Fatalf("first historical config requests = %d, want 1", got)
+	}
+	if got := secondHistoricalManifestRequests.Load(); got != 1 {
+		t.Fatalf("second historical manifest requests = %d, want 1", got)
+	}
+	if got := secondHistoricalConfigRequests.Load(); got != 1 {
+		t.Fatalf("second historical config requests = %d, want 1", got)
+	}
+	if got := invalidManifestRequests.Load(); got != 1 {
+		t.Fatalf("invalid manifest requests = %d, want 1", got)
+	}
+	if got := invalidConfigRequests.Load(); got != 0 {
+		t.Fatalf("invalid config requests = %d, want 0", got)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one invalid-artifact warning", warnings)
+	}
+	var warning *OCIIndexWarning
+	if !errors.As(warnings[0], &warning) || warning.Tag != "1.2.0" || !errors.Is(warning, ErrNotHelmOCIArtifact) {
+		t.Fatalf("warning = %#v, want invalid artifact for 1.2.0", warnings[0])
 	}
 }
 
@@ -961,7 +1050,7 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoBootstrapsWithOnlyForeignOrStaleCach
 		switch r.URL.Path {
 		case "/v2/" + repository + "/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", latestTag}})
-		case "/v2/" + repository + "/manifests/" + latestTag:
+		case "/v2/" + repository + "/manifests/1.0.0", "/v2/" + repository + "/manifests/" + latestTag:
 			manifestRequests++
 			w.Header().Set("Docker-Content-Digest", "sha256:2222222222222222222222222222222222222222222222222222222222222222")
 			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:config"))
@@ -989,12 +1078,12 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoBootstrapsWithOnlyForeignOrStaleCach
 	if got := len(index.Entries["demo"]); got != 2 {
 		t.Fatalf("demo versions = %d, want 2", got)
 	}
-	if manifestRequests != 1 || configRequests != 1 {
-		t.Fatalf("got %d manifest and %d config requests, want 1 each", manifestRequests, configRequests)
+	if manifestRequests != 2 || configRequests != 2 {
+		t.Fatalf("got %d manifest and %d config requests, want 2 each", manifestRequests, configRequests)
 	}
 }
 
-func TestLoadOCIRepoIndexWithCacheDirectRepoUsesLatestMetadataForMissingTags(t *testing.T) {
+func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsAllMissingTags(t *testing.T) {
 	const repository = "charts/demo"
 	const oldDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	const newDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -1004,11 +1093,18 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoUsesLatestMetadataForMissingTags(t *
 		switch r.URL.Path {
 		case "/v2/" + repository + "/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", "1.2.0", "1.3.0", "2.0.0"}})
+		case "/v2/" + repository + "/manifests/1.3.0":
+			manifestRequests["1.3.0"]++
+			w.Header().Set("Docker-Content-Digest", newDigest)
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:1.3.0-config"))
+		case "/v2/" + repository + "/blobs/sha256:1.3.0-config":
+			configRequests["1.3.0"]++
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"1.3.0"}`))
 		case "/v2/" + repository + "/manifests/2.0.0":
 			manifestRequests["2.0.0"]++
 			w.Header().Set("Docker-Content-Digest", newDigest)
-			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:new-config"))
-		case "/v2/" + repository + "/blobs/sha256:new-config":
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:2.0.0-config"))
+		case "/v2/" + repository + "/blobs/sha256:2.0.0-config":
 			configRequests["2.0.0"]++
 			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
 		default:
@@ -1037,15 +1133,15 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoUsesLatestMetadataForMissingTags(t *
 		t.Fatalf("demo versions = %d, want 4", len(versions))
 	}
 	for _, version := range versions {
-		if version.Version == "1.3.0" && version.Digest != "" {
-			t.Fatalf("new historical version digest = %q, want empty", version.Digest)
+		if (version.Version == "1.3.0" || version.Version == "2.0.0") && version.Digest != newDigest {
+			t.Fatalf("new version %q digest = %q, want %q", version.Version, version.Digest, newDigest)
 		}
 		if (version.Version == "1.0.0" || version.Version == "1.2.0") && version.Digest != oldDigest {
 			t.Fatalf("cached version %q digest = %q, want %q", version.Version, version.Digest, oldDigest)
 		}
 	}
-	if !reflect.DeepEqual(manifestRequests, map[string]int{"2.0.0": 1}) || !reflect.DeepEqual(configRequests, map[string]int{"2.0.0": 1}) {
-		t.Fatalf("manifest requests = %v, config requests = %v; want one request for only the latest tag", manifestRequests, configRequests)
+	if !reflect.DeepEqual(manifestRequests, map[string]int{"1.3.0": 1, "2.0.0": 1}) || !reflect.DeepEqual(configRequests, map[string]int{"1.3.0": 1, "2.0.0": 1}) {
+		t.Fatalf("manifest requests = %v, config requests = %v; want one request for each missing tag", manifestRequests, configRequests)
 	}
 }
 

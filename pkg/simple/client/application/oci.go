@@ -184,7 +184,7 @@ func chartMaintainers(maintainers []appv2.Maintainer) []*chart.Maintainer {
 	return result
 }
 
-// LoadOCIRepoIndexWithCache loads OCI metadata, reusing cached config metadata when manifest digests match.
+// LoadOCIRepoIndexWithCache loads OCI metadata, reusing complete cached versions by tag.
 func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCredential, cached OCIChartVersionCache) (idx helmrepo.IndexFile, warnings []error, err error) {
 	if !registry.IsOCI(u) {
 		return idx, nil, fmt.Errorf("invalid oci URL format: %s", SanitizeOCIURL(u))
@@ -212,40 +212,12 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 			continue
 		}
 		directRepository := len(repoCharts) == 1 && repoChart == ociRepositoryPath(parsedURL)
-		if directRepository {
-			semanticTags := semanticOCITags(tags)
-			latestTag, found := highestOCITag(semanticTags)
-			if !found {
-				continue
-			}
-			template := cached[ociCacheKey(parsedURL.Host, repoChart, latestTag)]
-			if template == nil {
-				var digest string
-				template, digest, err = inspectOCIChart(ctx, ociRegistry, repoChart, latestTag, nil)
-				if err != nil {
-					warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: latestTag, Digest: digest, Err: err})
-				}
-			}
-			for _, tag := range semanticTags {
-				chartVersion := cached[ociCacheKey(parsedURL.Host, repoChart, tag)]
-				if chartVersion == nil {
-					chartVersion = template
-				}
-				if chartVersion == nil {
-					continue
-				}
-				version := cloneChartVersionForTag(chartVersion, tag)
-				if tag != latestTag && cached[ociCacheKey(parsedURL.Host, repoChart, tag)] == nil {
-					version.Digest = ""
-				}
-				if err := index.MustAdd(version.Metadata, "", version.URLs[0], version.Digest); err != nil {
-					warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: tag, Digest: version.Digest, Err: err})
-				}
-			}
-			continue
-		}
 		cachedVersions, inspectedVersions, inspectionWarnings := loadOCIChartVersions(ctx, ociRegistry, parsedURL.Host, repoChart, semanticOCITags(tags), cached)
-		warnings = append(warnings, inspectionWarnings...)
+		for _, warning := range inspectionWarnings {
+			if directRepository || !errors.Is(warning, ErrNotHelmOCIArtifact) {
+				warnings = append(warnings, warning)
+			}
+		}
 		for _, chartVersion := range append(cachedVersions, inspectedVersions...) {
 			if err := index.MustAdd(chartVersion.Metadata, "", chartVersion.URLs[0], chartVersion.Digest); err != nil {
 				warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: chartVersion.Version, Digest: chartVersion.Digest, Err: err})
@@ -265,10 +237,7 @@ func loadOCIChartVersions(ctx context.Context, reg *oci.Registry, host, reposito
 			cachedVersions = append(cachedVersions, cloneChartVersionForTag(version, tag))
 			continue
 		}
-		version, digest, err := inspectOCIChart(ctx, reg, repository, tag, nil)
-		if errors.Is(err, ErrNotHelmOCIArtifact) {
-			continue
-		}
+		version, digest, err := inspectOCIChart(ctx, reg, repository, tag)
 		if err != nil {
 			warnings = append(warnings, &OCIIndexWarning{Repository: repository, Tag: tag, Digest: digest, Err: err})
 			continue
@@ -291,18 +260,6 @@ func semanticOCITags(tags []string) []string {
 	return result
 }
 
-func highestOCITag(tags []string) (string, bool) {
-	var highest *semver.Version
-	var result string
-	for _, tag := range tags {
-		version, err := semver.StrictNewVersion(strings.ReplaceAll(tag, "_", "+"))
-		if err == nil && (highest == nil || version.GreaterThan(highest)) {
-			highest, result = version, tag
-		}
-	}
-	return result, highest != nil
-}
-
 func cloneChartVersionForTag(source *helmrepo.ChartVersion, tag string) *helmrepo.ChartVersion {
 	result := *source
 	metadata := *source.Metadata
@@ -314,7 +271,7 @@ func cloneChartVersionForTag(source *helmrepo.ChartVersion, tag string) *helmrep
 
 // inspectOCIChart validates Helm media types and reads only the config blob
 // containing chart metadata; chart layers are intentionally not downloaded.
-func inspectOCIChart(ctx context.Context, reg *oci.Registry, repository, tag string, cached *helmrepo.ChartVersion) (*helmrepo.ChartVersion, string, error) {
+func inspectOCIChart(ctx context.Context, reg *oci.Registry, repository, tag string) (*helmrepo.ChartVersion, string, error) {
 	manifest, digest, err := reg.FetchManifestDescriptor(ctx, repository, tag)
 	if err != nil {
 		return nil, digest, err
@@ -331,11 +288,6 @@ func inspectOCIChart(ctx context.Context, reg *oci.Registry, repository, tag str
 	}
 	if !hasChartLayer {
 		return nil, digest, ErrNotHelmOCIArtifact
-	}
-	if cached != nil && cached.Metadata != nil && cached.Digest == digest {
-		result := *cached
-		result.Digest = digest
-		return &result, digest, nil
 	}
 	config, err := reg.FetchBlob(ctx, repository, manifest.Config)
 	if err != nil {
