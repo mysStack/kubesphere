@@ -71,6 +71,7 @@ func TestFetchManifestDescriptorDoesNotRetryPermanentStatus(t *testing.T) {
 	}{
 		{name: "unauthorized", status: http.StatusUnauthorized},
 		{name: "not found", status: http.StatusNotFound},
+		{name: "non-standard 600", status: 600},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			requests := 0
