@@ -36,8 +36,9 @@ import (
 
 type conflictOnceManualSyncPatchClient struct {
 	runtimeclient.Client
-	conflicted atomic.Bool
-	rewriteURL string
+	conflicted     atomic.Bool
+	rewriteURL     string
+	returnConflict bool
 }
 
 func (c *conflictOnceManualSyncPatchClient) Patch(ctx context.Context, obj runtimeclient.Object, patch runtimeclient.Patch, opts ...runtimeclient.PatchOption) error {
@@ -52,9 +53,25 @@ func (c *conflictOnceManualSyncPatchClient) Patch(ctx context.Context, obj runti
 				return err
 			}
 		}
-		return apierrors.NewConflict(schema.GroupResource{Group: appv2.GroupName, Resource: "repos"}, obj.GetName(), fmt.Errorf("injected conflict"))
+		if c.returnConflict {
+			return apierrors.NewConflict(schema.GroupResource{Group: appv2.GroupName, Resource: "repos"}, obj.GetName(), fmt.Errorf("injected conflict"))
+		}
 	}
 	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
+type failingManualSyncStatusClient struct{ runtimeclient.Client }
+
+func (c *failingManualSyncStatusClient) Status() runtimeclient.SubResourceWriter {
+	return failingManualSyncStatusWriter{SubResourceWriter: c.Client.Status()}
+}
+
+type failingManualSyncStatusWriter struct {
+	runtimeclient.SubResourceWriter
+}
+
+func (failingManualSyncStatusWriter) Update(context.Context, runtimeclient.Object, ...runtimeclient.SubResourceUpdateOption) error {
+	return fmt.Errorf("injected status update failure")
 }
 
 func TestCreateRepoDoesNotValidateIndex(t *testing.T) {
@@ -441,7 +458,7 @@ func TestValidateOCIRepoFailureDoesNotExposeURLUserinfo(t *testing.T) {
 	}
 }
 
-func TestManualSyncTriggersRepoUpdateWithoutStatusWrite(t *testing.T) {
+func TestManualSyncTriggersRepoUpdateAndSetsStatus(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := appv2.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
@@ -469,11 +486,41 @@ func TestManualSyncTriggersRepoUpdateWithoutStatusWrite(t *testing.T) {
 	if err := h.client.Get(context.Background(), runtimeclient.ObjectKey{Name: repo.Name}, updated); err != nil {
 		t.Fatalf("get repo after manual sync: %v", err)
 	}
-	if updated.Status.State != appv2.StatusSuccessful {
-		t.Fatalf("repo status = %q, want unchanged %q", updated.Status.State, appv2.StatusSuccessful)
+	if updated.Status.State != appv2.StatusManualTrigger {
+		t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusManualTrigger)
 	}
 	if updated.Annotations[appv2.ManualSyncTriggerAnnotation] == "" {
 		t.Fatal("manual sync did not update the controller trigger annotation")
+	}
+}
+
+func TestManualSyncAcceptsRequestWhenStatusUpdateFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	repo := &appv2.Repo{ObjectMeta: metav1.ObjectMeta{Name: "manual-sync-status-failure"}, Status: appv2.RepoStatus{State: appv2.StatusSuccessful}}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(repo).WithObjects(repo).Build()
+	h := &appHandler{client: &failingManualSyncStatusClient{Client: base}}
+	ws := new(restful.WebService)
+	ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+	ws.Route(ws.POST("/repos/{repo}/action").To(h.ManualSync))
+	container := restful.NewContainer()
+	container.Add(ws)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/repos/manual-sync-status-failure/action", nil)
+	req.Header.Set("Content-Type", restful.MIME_JSON)
+	container.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("manual sync status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	updated := &appv2.Repo{}
+	if err := base.Get(context.Background(), runtimeclient.ObjectKey{Name: repo.Name}, updated); err != nil {
+		t.Fatalf("get repo after manual sync: %v", err)
+	}
+	if updated.Annotations[appv2.ManualSyncTriggerAnnotation] == "" {
+		t.Fatal("manual sync marker was not persisted")
 	}
 }
 
@@ -522,7 +569,7 @@ func TestManualSyncRetriesMetadataPatchConflict(t *testing.T) {
 		Status:     appv2.RepoStatus{State: appv2.StatusSuccessful},
 	}
 	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(repo).WithObjects(repo).Build()
-	h := &appHandler{client: &conflictOnceManualSyncPatchClient{Client: base}}
+	h := &appHandler{client: &conflictOnceManualSyncPatchClient{Client: base, returnConflict: true}}
 	ws := new(restful.WebService)
 	ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
 	ws.Route(ws.POST("/repos/{repo}/action").To(h.ManualSync))
@@ -603,8 +650,8 @@ func TestManualSyncModes(t *testing.T) {
 				}
 				return
 			}
-			if updated.Status.State != appv2.StatusSuccessful {
-				t.Fatalf("repo status = %q, want unchanged %q", updated.Status.State, appv2.StatusSuccessful)
+			if updated.Status.State != appv2.StatusManualTrigger {
+				t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusManualTrigger)
 			}
 			if updated.Annotations[appv2.ManualSyncTriggerAnnotation] == "" {
 				t.Fatal("manual sync trigger annotation is empty")

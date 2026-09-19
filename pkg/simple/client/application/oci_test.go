@@ -738,6 +738,9 @@ func TestLoadOCIRepoIndexWarnsWhenHistoricalCatalogChartBecomesNonHelm(t *testin
 	if !errors.As(warnings[0], &warning) || warning.Repository != historicalRepository || !errors.Is(warning, ErrNotHelmOCIArtifact) {
 		t.Fatalf("warning = %#v, want historical non-Helm warning", warnings[0])
 	}
+	if warning.Tag != "1.0.0" {
+		t.Fatalf("warning tag = %q, want historical chart tag 1.0.0", warning.Tag)
+	}
 }
 
 func TestLoadOCIRepoIndexKeepsValidChartsAndReportsArtifactFailures(t *testing.T) {

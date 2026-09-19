@@ -172,6 +172,7 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 		return
 	}
 	trigger := strconv.FormatInt(time.Now().UnixNano(), 10)
+	var acceptedRepo *appv2.Repo
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current := &appv2.Repo{}
 		if err := h.client.Get(req.Request.Context(), key, current); err != nil {
@@ -188,7 +189,11 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 		if fullRefresh {
 			current.Annotations[appv2.FullRefreshTriggerAnnotation] = trigger
 		}
-		return h.client.Patch(req.Request.Context(), current, runtimeclient.MergeFrom(before))
+		if err := h.client.Patch(req.Request.Context(), current, runtimeclient.MergeFromWithOptions(before, runtimeclient.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		acceptedRepo = current.DeepCopy()
+		return nil
 	})
 	if err != nil {
 		if stderrs.Is(err, errFullRefreshRequiresOCI) {
@@ -197,6 +202,10 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 		}
 		api.HandleInternalError(resp, nil, err)
 		return
+	}
+	acceptedRepo.Status.State = appv2.StatusManualTrigger
+	if err := h.client.Status().Update(req.Request.Context(), acceptedRepo); err != nil {
+		klog.ErrorS(err, "update manual sync status failed", "repo", repoId)
 	}
 	resp.WriteEntity(errors.None)
 }
