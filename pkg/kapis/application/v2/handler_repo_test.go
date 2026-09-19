@@ -451,6 +451,77 @@ func TestManualSyncTriggersRepoUpdate(t *testing.T) {
 	}
 }
 
+func TestManualSyncModes(t *testing.T) {
+	tests := []struct {
+		name          string
+		url           string
+		mode          string
+		wantStatus    int
+		wantFull      bool
+		wantUnchanged bool
+	}{
+		{name: "default OCI", url: "oci://registry.example.invalid/charts", wantStatus: http.StatusOK},
+		{name: "incremental OCI", url: "oci://registry.example.invalid/charts", mode: "incremental", wantStatus: http.StatusOK},
+		{name: "full OCI", url: "oci://registry.example.invalid/charts", mode: "full", wantStatus: http.StatusOK, wantFull: true},
+		{name: "full HTTPS", url: "https://charts.example.invalid", mode: "full", wantStatus: http.StatusBadRequest, wantUnchanged: true},
+		{name: "unknown mode", url: "oci://registry.example.invalid/charts", mode: "reset", wantStatus: http.StatusBadRequest, wantUnchanged: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := appv2.AddToScheme(scheme); err != nil {
+				t.Fatalf("AddToScheme() error = %v", err)
+			}
+			repo := &appv2.Repo{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "manual-sync-mode-repo",
+					Annotations: map[string]string{"existing": "annotation"},
+				},
+				Spec:   appv2.RepoSpec{Url: tt.url},
+				Status: appv2.RepoStatus{State: appv2.StatusSuccessful},
+			}
+			h := &appHandler{client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(repo).WithObjects(repo).Build()}
+			ws := new(restful.WebService)
+			ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+			ws.Route(ws.POST("/repos/{repo}/action").To(h.ManualSync))
+			container := restful.NewContainer()
+			container.Add(ws)
+
+			recorder := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/repos/manual-sync-mode-repo/action?mode="+tt.mode, nil)
+			req.Header.Set("Content-Type", restful.MIME_JSON)
+			container.ServeHTTP(recorder, req)
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("manual sync status = %d, want %d: %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+
+			updated := &appv2.Repo{}
+			if err := h.client.Get(context.Background(), runtimeclient.ObjectKey{Name: repo.Name}, updated); err != nil {
+				t.Fatalf("get repo after manual sync: %v", err)
+			}
+			if tt.wantUnchanged {
+				if updated.Status.State != appv2.StatusSuccessful {
+					t.Fatalf("repo status = %q, want unchanged %q", updated.Status.State, appv2.StatusSuccessful)
+				}
+				if len(updated.Annotations) != 1 || updated.Annotations["existing"] != "annotation" {
+					t.Fatalf("repo annotations = %#v, want unchanged", updated.Annotations)
+				}
+				return
+			}
+			if updated.Status.State != appv2.StatusManualTrigger {
+				t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusManualTrigger)
+			}
+			if updated.Annotations[appv2.ManualSyncTriggerAnnotation] == "" {
+				t.Fatal("manual sync trigger annotation is empty")
+			}
+			if got := updated.Annotations[appv2.FullRefreshTriggerAnnotation]; (got != "") != tt.wantFull {
+				t.Fatalf("full refresh trigger annotation = %q, want full=%t", got, tt.wantFull)
+			}
+		})
+	}
+}
+
 func TestLoadRepoCredentialSecret(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
