@@ -158,6 +158,16 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 	if requestDone(err, resp) {
 		return
 	}
+	mode := req.QueryParameter("mode")
+	fullRefresh := mode == "full"
+	if mode != "" && mode != "incremental" && !fullRefresh {
+		api.HandleBadRequest(resp, req, fmt.Errorf("unsupported sync mode %q", mode))
+		return
+	}
+	if fullRefresh && !registry.IsOCI(repo.Spec.Url) {
+		api.HandleBadRequest(resp, req, fmt.Errorf("full refresh is only supported for OCI repositories"))
+		return
+	}
 	repo.Status.State = appv2.StatusManualTrigger
 	err = h.client.Status().Update(req.Request.Context(), repo)
 	if err != nil {
@@ -169,7 +179,11 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 	}
 	// Repo status-only updates do not enqueue the controller. Update metadata
 	// after the status marker so the controller observes a manual sync request.
-	repo.Annotations[appv2.ManualSyncTriggerAnnotation] = strconv.FormatInt(time.Now().UnixNano(), 10)
+	trigger := strconv.FormatInt(time.Now().UnixNano(), 10)
+	repo.Annotations[appv2.ManualSyncTriggerAnnotation] = trigger
+	if fullRefresh {
+		repo.Annotations[appv2.FullRefreshTriggerAnnotation] = trigger
+	}
 	err = h.client.Update(req.Request.Context(), repo)
 	if err != nil {
 		api.HandleInternalError(resp, nil, err)
