@@ -415,6 +415,42 @@ func TestValidateOCIRepoFailureDoesNotExposeURLUserinfo(t *testing.T) {
 	}
 }
 
+func TestManualSyncTriggersRepoUpdate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "manual-sync-repo"},
+		Status:     appv2.RepoStatus{State: appv2.StatusSuccessful},
+	}
+	h := &appHandler{client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(repo).WithObjects(repo).Build()}
+	ws := new(restful.WebService)
+	ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+	ws.Route(ws.POST("/repos/{repo}/action").To(h.ManualSync))
+	container := restful.NewContainer()
+	container.Add(ws)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/repos/manual-sync-repo/action", nil)
+	req.Header.Set("Content-Type", restful.MIME_JSON)
+	container.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("manual sync status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	updated := &appv2.Repo{}
+	if err := h.client.Get(context.Background(), runtimeclient.ObjectKey{Name: repo.Name}, updated); err != nil {
+		t.Fatalf("get repo after manual sync: %v", err)
+	}
+	if updated.Status.State != appv2.StatusManualTrigger {
+		t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusManualTrigger)
+	}
+	if updated.Annotations[appv2.ManualSyncTriggerAnnotation] == "" {
+		t.Fatal("manual sync did not update the controller trigger annotation")
+	}
+}
+
 func TestLoadRepoCredentialSecret(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
