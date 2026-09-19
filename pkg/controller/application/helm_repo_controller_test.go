@@ -116,13 +116,27 @@ func TestRepoReconcilerConsumeOCIFullRefresh(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := &appv2.Repo{ObjectMeta: metav1.ObjectMeta{Name: "full-refresh-repo", Annotations: tt.annotations}}
 			reconciler, _ := newRepoReconcilerTestClient(t, repo)
+			current := &appv2.Repo{}
+			if err := reconciler.Get(context.Background(), types.NamespacedName{Name: repo.Name}, current); err != nil {
+				t.Fatalf("get repo before consume: %v", err)
+			}
+			stale := current.DeepCopy()
 
-			got, err := reconciler.consumeOCIFullRefresh(context.Background(), repo)
+			got, err := reconciler.consumeOCIFullRefresh(context.Background(), current)
 			if err != nil {
 				t.Fatalf("consumeOCIFullRefresh() error = %v", err)
 			}
 			if got != tt.want {
 				t.Fatalf("consumeOCIFullRefresh() = %t, want %t", got, tt.want)
+			}
+			if tt.want {
+				got, err = reconciler.consumeOCIFullRefresh(context.Background(), stale)
+				if err != nil {
+					t.Fatalf("consume stale full refresh trigger: %v", err)
+				}
+				if got {
+					t.Fatal("stale full refresh trigger was consumed twice")
+				}
 			}
 			stored := &appv2.Repo{}
 			if err := reconciler.Get(context.Background(), types.NamespacedName{Name: repo.Name}, stored); err != nil {
