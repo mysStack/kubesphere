@@ -128,7 +128,10 @@ func (r *RepoReconciler) consumeOCIFullRefresh(ctx context.Context, repo *appv2.
 	}
 	before := repo.DeepCopy()
 	delete(repo.Annotations, appv2.FullRefreshTriggerAnnotation)
-	if err := r.Patch(ctx, repo, client.MergeFrom(before)); err != nil {
+	if err := r.Patch(ctx, repo, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil
@@ -216,6 +219,13 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	if noSync {
 		return reconcile.Result{RequeueAfter: requeueAfter}, nil
 	}
+	var fullRefresh bool
+	if registry.IsOCI(helmRepo.Spec.Url) {
+		fullRefresh, err = r.consumeOCIFullRefresh(ctx, helmRepo)
+		if err != nil {
+			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+		}
+	}
 
 	helmRepo.Status.State = appv2.StatusSyncing
 	err = r.UpdateStatus(ctx, helmRepo)
@@ -245,11 +255,6 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	repoURL := helmRepo.Spec.Url
 	if registry.IsOCI(helmRepo.Spec.Url) {
 		repoURL = application.SanitizeOCIURL(repoURL)
-		var fullRefresh bool
-		fullRefresh, err = r.consumeOCIFullRefresh(ctx, helmRepo)
-		if err != nil {
-			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
-		}
 		appVersionList := &appv2.ApplicationVersionList{}
 		if err = r.Client.List(ctx, appVersionList, &opts); err != nil {
 			logger.Error(err, "list application versions failed")
