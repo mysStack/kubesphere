@@ -673,6 +673,68 @@ func TestLoadRepoIndexFromOciBuildsMetadataAndFiltersImages(t *testing.T) {
 	}
 }
 
+func TestLoadOCIRepoIndexWarnsWhenHistoricalCatalogChartBecomesNonHelm(t *testing.T) {
+	const (
+		goodRepository       = "charts/good"
+		historicalRepository = "charts/historical"
+		imageRepository      = "images/unrelated"
+	)
+	var historicalIsChart atomic.Bool
+	historicalIsChart.Store(true)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/_catalog":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"repositories": {goodRepository, historicalRepository, imageRepository}})
+		case "/v2/" + goodRepository + "/tags/list", "/v2/" + historicalRepository + "/tags/list", "/v2/" + imageRepository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0"}})
+		case "/v2/" + goodRepository + "/manifests/1.0.0":
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:good-config"))
+		case "/v2/" + historicalRepository + "/manifests/1.0.0":
+			if historicalIsChart.Load() {
+				_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:historical-config"))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}})
+		case "/v2/" + imageRepository + "/manifests/1.0.0":
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}})
+		case "/v2/" + goodRepository + "/blobs/sha256:good-config":
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"good","version":"1.0.0"}`))
+		case "/v2/" + historicalRepository + "/blobs/sha256:historical-config":
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"historical","version":"1.0.0"}`))
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	host := server.Listener.Addr().String()
+	u := fmt.Sprintf("oci://%s", host)
+	first, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), u, appv2.RepoCredential{PlainHTTP: true}, nil)
+	if err != nil || len(warnings) != 0 || len(first.Entries) != 2 {
+		t.Fatalf("initial catalog load = entries %v, warnings %v, error %v", first.Entries, warnings, err)
+	}
+	history := OCIChartVersionCache{
+		ociCacheKey(host, goodRepository, "1.0.0"):       nil,
+		ociCacheKey(host, historicalRepository, "1.0.0"): nil,
+	}
+	historicalIsChart.Store(false)
+	second, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), u, appv2.RepoCredential{PlainHTTP: true}, history)
+	if err != nil {
+		t.Fatalf("changed catalog load error = %v", err)
+	}
+	if len(second.Entries["good"]) != 1 || len(second.Entries["historical"]) != 0 {
+		t.Fatalf("changed catalog entries = %v, want only good", second.Entries)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("changed catalog warnings = %v, want only historical chart warning", warnings)
+	}
+	var warning *OCIIndexWarning
+	if !errors.As(warnings[0], &warning) || warning.Repository != historicalRepository || !errors.Is(warning, ErrNotHelmOCIArtifact) {
+		t.Fatalf("warning = %#v, want historical non-Helm warning", warnings[0])
+	}
+}
+
 func TestLoadOCIRepoIndexKeepsValidChartsAndReportsArtifactFailures(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

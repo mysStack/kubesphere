@@ -14,7 +14,7 @@
 
 - HTTPS Helm Repo 不得进入 OCI worker、缓存或重试路径。
 - 不新增 ConfigMap、数据库或凭据存储；复用 ApplicationVersion 的 Chart metadata 和 digest。
-- 默认最大并发为 4，最大重试次数为 2，退避为 200ms、500ms，单请求超时沿用 5 秒。
+- 默认最大并发为 4，最大重试次数为 2，退避为 200ms、500ms，单请求超时为 30 秒。
 - 单个 tag 失败只写入 warning；存在 warning 时 Controller 不删除已有 Application/ApplicationVersion。
 - 已缓存 tag 默认不重新读取 manifest；旧 tag digest 全量重检留给后续显式操作。
 - 不读取、输出或写入 Registry 密码和 Token。
