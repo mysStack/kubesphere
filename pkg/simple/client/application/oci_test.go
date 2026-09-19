@@ -684,6 +684,7 @@ func TestLoadOCIRepoIndexWarnsWhenHistoricalCatalogChartBecomesNonHelm(t *testin
 		goodRepository       = "charts/good"
 		historicalRepository = "charts/historical"
 		imageRepository      = "images/unrelated"
+		unrelatedImageTag    = "2.0.0"
 	)
 	var historicalIsChart atomic.Bool
 	historicalIsChart.Store(true)
@@ -691,8 +692,10 @@ func TestLoadOCIRepoIndexWarnsWhenHistoricalCatalogChartBecomesNonHelm(t *testin
 		switch r.URL.Path {
 		case "/v2/_catalog":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"repositories": {goodRepository, historicalRepository, imageRepository}})
-		case "/v2/" + goodRepository + "/tags/list", "/v2/" + historicalRepository + "/tags/list", "/v2/" + imageRepository + "/tags/list":
+		case "/v2/" + goodRepository + "/tags/list", "/v2/" + imageRepository + "/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0"}})
+		case "/v2/" + historicalRepository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0", unrelatedImageTag}})
 		case "/v2/" + goodRepository + "/manifests/1.0.0":
 			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:good-config"))
 		case "/v2/" + historicalRepository + "/manifests/1.0.0":
@@ -700,6 +703,8 @@ func TestLoadOCIRepoIndexWarnsWhenHistoricalCatalogChartBecomesNonHelm(t *testin
 				_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:historical-config"))
 				return
 			}
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}})
+		case "/v2/" + historicalRepository + "/manifests/" + unrelatedImageTag:
 			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}})
 		case "/v2/" + imageRepository + "/manifests/1.0.0":
 			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}})

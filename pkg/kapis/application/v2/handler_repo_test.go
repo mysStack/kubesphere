@@ -37,10 +37,21 @@ import (
 type conflictOnceManualSyncPatchClient struct {
 	runtimeclient.Client
 	conflicted atomic.Bool
+	rewriteURL string
 }
 
 func (c *conflictOnceManualSyncPatchClient) Patch(ctx context.Context, obj runtimeclient.Object, patch runtimeclient.Patch, opts ...runtimeclient.PatchOption) error {
 	if _, isRepo := obj.(*appv2.Repo); isRepo && c.conflicted.CompareAndSwap(false, true) {
+		if c.rewriteURL != "" {
+			current := &appv2.Repo{}
+			if err := c.Client.Get(ctx, runtimeclient.ObjectKeyFromObject(obj), current); err != nil {
+				return err
+			}
+			current.Spec.Url = c.rewriteURL
+			if err := c.Client.Update(ctx, current); err != nil {
+				return err
+			}
+		}
 		return apierrors.NewConflict(schema.GroupResource{Group: appv2.GroupName, Resource: "repos"}, obj.GetName(), fmt.Errorf("injected conflict"))
 	}
 	return c.Client.Patch(ctx, obj, patch, opts...)
@@ -430,7 +441,7 @@ func TestValidateOCIRepoFailureDoesNotExposeURLUserinfo(t *testing.T) {
 	}
 }
 
-func TestManualSyncTriggersRepoUpdate(t *testing.T) {
+func TestManualSyncTriggersRepoUpdateWithoutStatusWrite(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := appv2.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
@@ -458,11 +469,45 @@ func TestManualSyncTriggersRepoUpdate(t *testing.T) {
 	if err := h.client.Get(context.Background(), runtimeclient.ObjectKey{Name: repo.Name}, updated); err != nil {
 		t.Fatalf("get repo after manual sync: %v", err)
 	}
-	if updated.Status.State != appv2.StatusManualTrigger {
-		t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusManualTrigger)
+	if updated.Status.State != appv2.StatusSuccessful {
+		t.Fatalf("repo status = %q, want unchanged %q", updated.Status.State, appv2.StatusSuccessful)
 	}
 	if updated.Annotations[appv2.ManualSyncTriggerAnnotation] == "" {
 		t.Fatal("manual sync did not update the controller trigger annotation")
+	}
+}
+
+func TestManualSyncRejectsFullRefreshWhenRepoChangesToHTTPDuringPatchRetry(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "rewritten-manual-sync"},
+		Spec:       appv2.RepoSpec{Url: "oci://registry.example.invalid/charts"},
+		Status:     appv2.RepoStatus{State: appv2.StatusSuccessful},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(repo).WithObjects(repo).Build()
+	h := &appHandler{client: &conflictOnceManualSyncPatchClient{Client: base, rewriteURL: "https://charts.example.invalid"}}
+	ws := new(restful.WebService)
+	ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+	ws.Route(ws.POST("/repos/{repo}/action").To(h.ManualSync))
+	container := restful.NewContainer()
+	container.Add(ws)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/repos/rewritten-manual-sync/action?mode=full", nil)
+	req.Header.Set("Content-Type", restful.MIME_JSON)
+	container.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("manual sync status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	updated := &appv2.Repo{}
+	if err := base.Get(context.Background(), runtimeclient.ObjectKey{Name: repo.Name}, updated); err != nil {
+		t.Fatalf("get repo after manual sync: %v", err)
+	}
+	if updated.Annotations[appv2.ManualSyncTriggerAnnotation] != "" || updated.Annotations[appv2.FullRefreshTriggerAnnotation] != "" {
+		t.Fatalf("repo annotations = %#v, want no sync markers", updated.Annotations)
 	}
 }
 
@@ -558,8 +603,8 @@ func TestManualSyncModes(t *testing.T) {
 				}
 				return
 			}
-			if updated.Status.State != appv2.StatusManualTrigger {
-				t.Fatalf("repo status = %q, want %q", updated.Status.State, appv2.StatusManualTrigger)
+			if updated.Status.State != appv2.StatusSuccessful {
+				t.Fatalf("repo status = %q, want unchanged %q", updated.Status.State, appv2.StatusSuccessful)
 			}
 			if updated.Annotations[appv2.ManualSyncTriggerAnnotation] == "" {
 				t.Fatal("manual sync trigger annotation is empty")
