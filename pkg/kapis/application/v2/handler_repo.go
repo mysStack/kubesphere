@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
+	"time"
 
 	"helm.sh/helm/v3/pkg/registry"
 	k8suitl "kubesphere.io/kubesphere/pkg/utils/k8sutil"
@@ -157,6 +159,17 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 	}
 	repo.Status.State = appv2.StatusManualTrigger
 	err = h.client.Status().Update(req.Request.Context(), repo)
+	if err != nil {
+		api.HandleInternalError(resp, nil, err)
+		return
+	}
+	if repo.Annotations == nil {
+		repo.Annotations = map[string]string{}
+	}
+	// Repo status-only updates do not enqueue the controller. Update metadata
+	// after the status marker so the controller observes a manual sync request.
+	repo.Annotations[appv2.ManualSyncTriggerAnnotation] = strconv.FormatInt(time.Now().UnixNano(), 10)
+	err = h.client.Update(req.Request.Context(), repo)
 	if err != nil {
 		api.HandleInternalError(resp, nil, err)
 		return

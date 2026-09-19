@@ -10,6 +10,7 @@ const (
 	HasCrdLabelKey              = "application.kubesphere.io/hascrd"
 	AppStoreLabelKey            = "application.kubesphere.io/app-store"
 	TimeoutRecheck              = "application.kubesphere.io/timeout-recheck"
+	ManualSyncTriggerAnnotation = "application.kubesphere.io/manual-sync-trigger"
 	AppCategoryNameKey          = "application.kubesphere.io/app-category-name"
 	LatestAppVersionKey         = "application.kubesphere.io/latest-app-version"
 	AppMaintainersKey           = "application.kubesphere.io/app-maintainers"
