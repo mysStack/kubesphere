@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,14 +23,28 @@ import (
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	appv2 "kubesphere.io/api/application/v2"
 	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"kubesphere.io/kubesphere/pkg/constants"
 )
+
+type conflictOnceManualSyncPatchClient struct {
+	runtimeclient.Client
+	conflicted atomic.Bool
+}
+
+func (c *conflictOnceManualSyncPatchClient) Patch(ctx context.Context, obj runtimeclient.Object, patch runtimeclient.Patch, opts ...runtimeclient.PatchOption) error {
+	if _, isRepo := obj.(*appv2.Repo); isRepo && c.conflicted.CompareAndSwap(false, true) {
+		return apierrors.NewConflict(schema.GroupResource{Group: appv2.GroupName, Resource: "repos"}, obj.GetName(), fmt.Errorf("injected conflict"))
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
 
 func TestCreateRepoDoesNotValidateIndex(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -451,6 +466,40 @@ func TestManualSyncTriggersRepoUpdate(t *testing.T) {
 	}
 }
 
+func TestManualSyncRetriesMetadataPatchConflict(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "conflicted-manual-sync"},
+		Spec:       appv2.RepoSpec{Url: "oci://registry.example.invalid/charts"},
+		Status:     appv2.RepoStatus{State: appv2.StatusSuccessful},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(repo).WithObjects(repo).Build()
+	h := &appHandler{client: &conflictOnceManualSyncPatchClient{Client: base}}
+	ws := new(restful.WebService)
+	ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+	ws.Route(ws.POST("/repos/{repo}/action").To(h.ManualSync))
+	container := restful.NewContainer()
+	container.Add(ws)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/repos/conflicted-manual-sync/action?mode=full", nil)
+	req.Header.Set("Content-Type", restful.MIME_JSON)
+	container.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("manual sync status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	updated := &appv2.Repo{}
+	if err := base.Get(context.Background(), runtimeclient.ObjectKey{Name: repo.Name}, updated); err != nil {
+		t.Fatalf("get repo after manual sync: %v", err)
+	}
+	if updated.Annotations[appv2.ManualSyncTriggerAnnotation] == "" || updated.Annotations[appv2.FullRefreshTriggerAnnotation] == "" {
+		t.Fatalf("full refresh triggers = %#v, want both markers", updated.Annotations)
+	}
+}
+
 func TestManualSyncModes(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -517,6 +566,9 @@ func TestManualSyncModes(t *testing.T) {
 			}
 			if got := updated.Annotations[appv2.FullRefreshTriggerAnnotation]; (got != "") != tt.wantFull {
 				t.Fatalf("full refresh trigger annotation = %q, want full=%t", got, tt.wantFull)
+			}
+			if tt.wantFull && updated.Annotations[appv2.ManualSyncTriggerAnnotation] != updated.Annotations[appv2.FullRefreshTriggerAnnotation] {
+				t.Fatalf("manual and full refresh triggers were not written atomically: %#v", updated.Annotations)
 			}
 		})
 	}

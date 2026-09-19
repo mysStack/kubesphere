@@ -55,7 +55,7 @@ OCI Registry 的 tag API 不返回每个 tag 的 digest，因此无法在不请�
 第一期使用安全默认值，不新增 CRD 字段：
 
 - 最大并发：4
-- 单次 Registry 请求超时：沿用现有 5 秒
+- 单次 Registry 请求超时：30 秒
 - 最大重试次数：2（即最多 3 次请求）
 - 退避：200ms、500ms
 

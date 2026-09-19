@@ -17,13 +17,16 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"helm.sh/helm/v3/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	appv2 "kubesphere.io/api/application/v2"
 	appclient "kubesphere.io/kubesphere/pkg/simple/client/application"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -33,6 +36,18 @@ type ociControllerChartFixture struct {
 	tag        string
 	digest     string
 	config     string
+}
+
+type conflictOnceRepoPatchClient struct {
+	ctrlclient.Client
+	conflicted atomic.Bool
+}
+
+func (c *conflictOnceRepoPatchClient) Patch(ctx context.Context, obj ctrlclient.Object, patch ctrlclient.Patch, opts ...ctrlclient.PatchOption) error {
+	if _, isRepo := obj.(*appv2.Repo); isRepo && c.conflicted.CompareAndSwap(false, true) {
+		return apierrors.NewConflict(schema.GroupResource{Group: appv2.GroupName, Resource: "repos"}, obj.GetName(), fmt.Errorf("injected conflict"))
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
 }
 
 func newOCIControllerServer(t *testing.T, fixtures []ociControllerChartFixture) *httptest.Server {
@@ -130,12 +145,8 @@ func TestRepoReconcilerConsumeOCIFullRefresh(t *testing.T) {
 				t.Fatalf("consumeOCIFullRefresh() = %t, want %t", got, tt.want)
 			}
 			if tt.want {
-				got, err = reconciler.consumeOCIFullRefresh(context.Background(), stale)
-				if err != nil {
-					t.Fatalf("consume stale full refresh trigger: %v", err)
-				}
-				if got {
-					t.Fatal("stale full refresh trigger was consumed twice")
+				if _, err = reconciler.consumeOCIFullRefresh(context.Background(), stale); !apierrors.IsConflict(err) {
+					t.Fatalf("consume stale full refresh trigger error = %v, want conflict", err)
 				}
 			}
 			stored := &appv2.Repo{}
@@ -348,6 +359,76 @@ func TestRepoReconcilerPreservesApplicationsWhenOCIIndexIsPartial(t *testing.T) 
 	}
 	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: validAppName}, &appv2.Application{}); err != nil {
 		t.Fatalf("valid application was not synchronized: %v", err)
+	}
+}
+
+func TestRepoReconcilerPreservesHistoricalCatalogChartThatBecomesNonHelm(t *testing.T) {
+	const (
+		goodRepository       = "charts/good"
+		historicalRepository = "charts/historical"
+		imageRepository      = "images/unrelated"
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/", "/v2":
+			w.WriteHeader(http.StatusOK)
+		case "/v2/_catalog":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"repositories": {goodRepository, historicalRepository, imageRepository}})
+		case "/v2/" + goodRepository + "/tags/list", "/v2/" + historicalRepository + "/tags/list", "/v2/" + imageRepository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0"}})
+		case "/v2/" + goodRepository + "/manifests/1.0.0":
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: digest.FromString("good-config")}, Layers: []ocispec.Descriptor{{MediaType: registry.ChartLayerMediaType}}})
+		case "/v2/" + historicalRepository + "/manifests/1.0.0", "/v2/" + imageRepository + "/manifests/1.0.0":
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}})
+		case "/v2/" + goodRepository + "/blobs/" + digest.FromString("good-config").String():
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"good","version":"1.0.0"}`))
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "historical-catalog-repo", UID: types.UID("repo-uid"), Annotations: map[string]string{
+			appv2.ManualSyncTriggerAnnotation:  "request-1",
+			appv2.FullRefreshTriggerAnnotation: "request-1",
+		}},
+		Spec:   appv2.RepoSpec{Url: fmt.Sprintf("oci://%s", server.Listener.Addr()), Credential: appv2.RepoCredential{PlainHTTP: true}, SyncPeriod: ptr.To(0)},
+		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	historicalAppName := repo.Name + "-" + appclient.GenerateShortNameMD5Hash("historical")
+	historicalApp := &appv2.Application{ObjectMeta: metav1.ObjectMeta{
+		Name:        historicalAppName,
+		Labels:      map[string]string{appv2.RepoIDLabelKey: repo.Name},
+		Annotations: map[string]string{appv2.AppOriginalNameLabelKey: "historical"},
+	}}
+	historicalVersion := &appv2.ApplicationVersion{
+		ObjectMeta: metav1.ObjectMeta{Name: historicalAppName + "-1.0.0", Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name, appv2.AppIDLabelKey: historicalAppName}},
+		Spec:       appv2.ApplicationVersionSpec{VersionName: "1.0.0", PullUrl: fmt.Sprintf("oci://%s/%s:1.0.0", server.Listener.Addr(), historicalRepository)},
+	}
+	reconciler, recorder := newRepoReconcilerTestClient(t, repo, historicalApp, historicalVersion)
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: historicalApp.Name}, &appv2.Application{}); err != nil {
+		t.Fatalf("historical chart application was deleted: %v", err)
+	}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: historicalVersion.Name}, &appv2.ApplicationVersion{}); err != nil {
+		t.Fatalf("historical chart version was deleted: %v", err)
+	}
+	warnings := 0
+	for queued := len(recorder.Events); queued > 0; queued-- {
+		event := <-recorder.Events
+		if strings.HasPrefix(event, corev1.EventTypeWarning+" OCIIndexWarning ") {
+			warnings++
+			if !strings.Contains(event, historicalRepository) || strings.Contains(event, imageRepository) {
+				t.Fatalf("warning event = %q, want only historical repository", event)
+			}
+		}
+	}
+	if warnings != 1 {
+		t.Fatalf("warning event count = %d, want 1", warnings)
 	}
 }
 
@@ -621,7 +702,7 @@ func TestRepoReconcilerFullRefreshBypassesCachedOCIChartTagOnce(t *testing.T) {
 			Credential: appv2.RepoCredential{PlainHTTP: true},
 			SyncPeriod: ptr.To(0),
 		},
-		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
+		Status: appv2.RepoStatus{State: appv2.StatusSuccessful},
 	}
 	appName := repo.Name + "-" + appclient.GenerateShortNameMD5Hash("demo")
 	app := &appv2.Application{
@@ -685,8 +766,12 @@ func TestRepoReconcilerFullRefreshBypassesCachedOCIChartTagOnce(t *testing.T) {
 	if _, found := updated.Annotations[appv2.FullRefreshTriggerAnnotation]; found {
 		t.Fatal("full refresh trigger annotation remains after reconcile")
 	}
-	updated.Status.State = appv2.StatusManualTrigger
-	if err := reconciler.Status().Update(context.Background(), updated); err != nil {
+	before := updated.DeepCopy()
+	if updated.Annotations == nil {
+		updated.Annotations = map[string]string{}
+	}
+	updated.Annotations[appv2.ManualSyncTriggerAnnotation] = "2"
+	if err := client.Patch(context.Background(), updated, ctrlclient.MergeFrom(before)); err != nil {
 		t.Fatalf("trigger normal reconcile: %v", err)
 	}
 	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
@@ -694,6 +779,85 @@ func TestRepoReconcilerFullRefreshBypassesCachedOCIChartTagOnce(t *testing.T) {
 	}
 	if manifestRequests != 1 || configRequests != 1 {
 		t.Fatalf("normal reconcile manifest requests = %d, config requests = %d; want no additional requests", manifestRequests, configRequests)
+	}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: repo.Name}, updated); err != nil {
+		t.Fatalf("get repo after normal reconcile: %v", err)
+	}
+	if _, found := updated.Annotations[appv2.ManualSyncTriggerAnnotation]; found {
+		t.Fatal("manual sync trigger annotation remains after normal reconcile")
+	}
+}
+
+func TestRepoReconcilerRequeuesFullRefreshConsumeConflictWithoutIncrementalSync(t *testing.T) {
+	const chartRepo = "charts/demo"
+	var manifestRequests atomic.Int32
+	var configRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/", "/v2":
+			w.WriteHeader(http.StatusOK)
+		case "/v2/" + chartRepo + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0"}})
+		case "/v2/" + chartRepo + "/manifests/1.0.0":
+			manifestRequests.Add(1)
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: digest.FromString("config")}, Layers: []ocispec.Descriptor{{MediaType: registry.ChartLayerMediaType}}})
+		case "/v2/" + chartRepo + "/blobs/" + digest.FromString("config").String():
+			configRequests.Add(1)
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"1.0.0"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "conflicted-full-refresh", Annotations: map[string]string{
+			appv2.ManualSyncTriggerAnnotation:  "request-1",
+			appv2.FullRefreshTriggerAnnotation: "request-1",
+		}},
+		Spec:   appv2.RepoSpec{Url: fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), chartRepo), Credential: appv2.RepoCredential{PlainHTTP: true}, SyncPeriod: ptr.To(0)},
+		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	appName := repo.Name + "-" + appclient.GenerateShortNameMD5Hash("demo")
+	app := &appv2.Application{ObjectMeta: metav1.ObjectMeta{Name: appName, Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name}, Annotations: map[string]string{appv2.AppOriginalNameLabelKey: "demo"}}}
+	version := &appv2.ApplicationVersion{
+		ObjectMeta: metav1.ObjectMeta{Name: appName + "-1.0.0", Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name, appv2.AppIDLabelKey: appName}},
+		Spec:       appv2.ApplicationVersionSpec{VersionName: "1.0.0", PullUrl: fmt.Sprintf("oci://%s/%s:1.0.0", server.Listener.Addr(), chartRepo)},
+	}
+	base, _ := newRepoReconcilerTestClient(t, repo, app, version)
+	base.Client = &conflictOnceRepoPatchClient{Client: base.Client}
+	request := reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}
+
+	result, err := base.Reconcile(context.Background(), request)
+	if err != nil {
+		t.Fatalf("conflicted Reconcile() error = %v", err)
+	}
+	if !result.Requeue {
+		t.Fatalf("conflicted Reconcile() result = %#v, want explicit requeue", result)
+	}
+	if manifestRequests.Load() != 0 || configRequests.Load() != 0 {
+		t.Fatalf("conflicted reconcile performed incremental sync: manifest=%d config=%d", manifestRequests.Load(), configRequests.Load())
+	}
+	stored := &appv2.Repo{}
+	if err := base.Get(context.Background(), request.NamespacedName, stored); err != nil {
+		t.Fatalf("get repo after conflict: %v", err)
+	}
+	if stored.Annotations[appv2.FullRefreshTriggerAnnotation] == "" {
+		t.Fatal("full refresh trigger was lost after consume conflict")
+	}
+
+	if _, err := base.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("retried Reconcile() error = %v", err)
+	}
+	if manifestRequests.Load() != 1 || configRequests.Load() != 1 {
+		t.Fatalf("retried full refresh requests: manifest=%d config=%d, want 1 each", manifestRequests.Load(), configRequests.Load())
+	}
+	if err := base.Get(context.Background(), request.NamespacedName, stored); err != nil {
+		t.Fatalf("get repo after retry: %v", err)
+	}
+	if _, found := stored.Annotations[appv2.FullRefreshTriggerAnnotation]; found {
+		t.Fatal("full refresh trigger remains after successful retry")
 	}
 }
 

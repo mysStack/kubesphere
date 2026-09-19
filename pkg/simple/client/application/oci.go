@@ -119,6 +119,15 @@ func LoadOCIRepoIndex(ctx context.Context, u string, cred appv2.RepoCredential) 
 // OCIChartVersionCache maps an original OCI reference to cached chart metadata.
 type OCIChartVersionCache map[string]*helmrepo.ChartVersion
 
+// ForFullRefresh retains repository history while forcing every tag to be inspected.
+func (cached OCIChartVersionCache) ForFullRefresh() OCIChartVersionCache {
+	history := make(OCIChartVersionCache, len(cached))
+	for key := range cached {
+		history[key] = nil
+	}
+	return history
+}
+
 // BuildOCIChartVersionCache builds cache entries from synchronized Applications and ApplicationVersions.
 func BuildOCIChartVersionCache(apps []appv2.Application, versions []appv2.ApplicationVersion) OCIChartVersionCache {
 	appMetadata := make(map[string]*chart.Metadata, len(apps))
@@ -216,9 +225,10 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 			continue
 		}
 		directRepository := len(repoCharts) == 1 && repoChart == ociRepositoryPath(parsedURL)
+		historicalRepository := hasOCIRepositoryHistory(cached, parsedURL.Host, repoChart)
 		chartVersions, inspectionWarnings := loadOCIChartVersions(ctx, ociRegistry, parsedURL.Host, repoChart, semanticOCITags(tags), cached)
 		for _, warning := range inspectionWarnings {
-			if directRepository || !errors.Is(warning, ErrNotHelmOCIArtifact) {
+			if directRepository || historicalRepository || !errors.Is(warning, ErrNotHelmOCIArtifact) {
 				warnings = append(warnings, warning)
 			}
 		}
@@ -230,6 +240,16 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 	}
 	index.SortEntries()
 	return *index, warnings, nil
+}
+
+func hasOCIRepositoryHistory(cached OCIChartVersionCache, host, repository string) bool {
+	prefix := host + "/" + repository + ":"
+	for key := range cached {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // loadOCIChartVersions adds cached versions without metadata requests and inspects only uncached tags.

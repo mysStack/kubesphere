@@ -122,19 +122,19 @@ func (r *RepoReconciler) failRepoSync(ctx context.Context, helmRepo *appv2.Repo,
 	return syncErr
 }
 
+// consumeOCIFullRefresh atomically consumes the request markers and reports whether this sync is full.
 func (r *RepoReconciler) consumeOCIFullRefresh(ctx context.Context, repo *appv2.Repo) (bool, error) {
-	if _, found := repo.Annotations[appv2.FullRefreshTriggerAnnotation]; !found {
+	_, fullRefresh := repo.Annotations[appv2.FullRefreshTriggerAnnotation]
+	if _, manualSync := repo.Annotations[appv2.ManualSyncTriggerAnnotation]; !manualSync && !fullRefresh {
 		return false, nil
 	}
 	before := repo.DeepCopy()
+	delete(repo.Annotations, appv2.ManualSyncTriggerAnnotation)
 	delete(repo.Annotations, appv2.FullRefreshTriggerAnnotation)
 	if err := r.Patch(ctx, repo, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
-		if apierrors.IsConflict(err) {
-			return false, nil
-		}
 		return false, err
 	}
-	return true, nil
+	return fullRefresh, nil
 }
 
 func (r *RepoReconciler) skipSync(helmRepo *appv2.Repo) (bool, error) {
@@ -212,18 +212,26 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	}
 
 	requeueAfter := time.Duration(*helmRepo.Spec.SyncPeriod) * time.Second
-	noSync, err := r.skipSync(helmRepo)
-	if err != nil {
-		return reconcile.Result{}, err
-	}
-	if noSync {
-		return reconcile.Result{RequeueAfter: requeueAfter}, nil
-	}
+	var err error
 	var fullRefresh bool
-	if registry.IsOCI(helmRepo.Spec.Url) {
+	_, manualSync := helmRepo.Annotations[appv2.ManualSyncTriggerAnnotation]
+	_, fullRefreshRequested := helmRepo.Annotations[appv2.FullRefreshTriggerAnnotation]
+	fullRefreshRequested = fullRefreshRequested && registry.IsOCI(helmRepo.Spec.Url)
+	if manualSync || fullRefreshRequested {
 		fullRefresh, err = r.consumeOCIFullRefresh(ctx, helmRepo)
 		if err != nil {
-			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+			if apierrors.IsConflict(err) {
+				return reconcile.Result{Requeue: true}, nil
+			}
+			return reconcile.Result{}, err
+		}
+	} else {
+		noSync, err := r.skipSync(helmRepo)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+		if noSync {
+			return reconcile.Result{RequeueAfter: requeueAfter}, nil
 		}
 	}
 
@@ -260,9 +268,9 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 			logger.Error(err, "list application versions failed")
 			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 		}
-		var cached application.OCIChartVersionCache
-		if !fullRefresh {
-			cached = application.BuildOCIChartVersionCache(appList.Items, appVersionList.Items)
+		cached := application.BuildOCIChartVersionCache(appList.Items, appVersionList.Items)
+		if fullRefresh {
+			cached = cached.ForFullRefresh()
 		}
 		index, indexWarnings, err = application.LoadOCIRepoIndexWithCache(ctx, repoURL, credential, cached)
 		if err == nil && len(index.Entries) == 0 {

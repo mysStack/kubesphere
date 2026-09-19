@@ -22,8 +22,10 @@ import (
 
 	"github.com/emicklei/go-restful/v3"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	appv2 "kubesphere.io/api/application/v2"
 	runtimeclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -168,26 +170,37 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 		api.HandleBadRequest(resp, req, fmt.Errorf("full refresh is only supported for OCI repositories"))
 		return
 	}
-	repo.Status.State = appv2.StatusManualTrigger
-	err = h.client.Status().Update(req.Request.Context(), repo)
-	if err != nil {
-		api.HandleInternalError(resp, nil, err)
-		return
-	}
-	if repo.Annotations == nil {
-		repo.Annotations = map[string]string{}
-	}
-	// Repo status-only updates do not enqueue the controller. Update metadata
-	// after the status marker so the controller observes a manual sync request.
 	trigger := strconv.FormatInt(time.Now().UnixNano(), 10)
-	repo.Annotations[appv2.ManualSyncTriggerAnnotation] = trigger
-	if fullRefresh {
-		repo.Annotations[appv2.FullRefreshTriggerAnnotation] = trigger
-	}
-	err = h.client.Update(req.Request.Context(), repo)
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &appv2.Repo{}
+		if err := h.client.Get(req.Request.Context(), key, current); err != nil {
+			return err
+		}
+		before := current.DeepCopy()
+		if current.Annotations == nil {
+			current.Annotations = map[string]string{}
+		}
+		current.Annotations[appv2.ManualSyncTriggerAnnotation] = trigger
+		if fullRefresh {
+			current.Annotations[appv2.FullRefreshTriggerAnnotation] = trigger
+		}
+		return h.client.Patch(req.Request.Context(), current, runtimeclient.MergeFrom(before))
+	})
 	if err != nil {
 		api.HandleInternalError(resp, nil, err)
 		return
+	}
+	latest := &appv2.Repo{}
+	if err = h.client.Get(req.Request.Context(), key, latest); err != nil {
+		api.HandleInternalError(resp, nil, err)
+		return
+	}
+	if _, markerStillPending := latest.Annotations[appv2.ManualSyncTriggerAnnotation]; markerStillPending {
+		latest.Status.State = appv2.StatusManualTrigger
+		if err = h.client.Status().Update(req.Request.Context(), latest); err != nil && !apierrors.IsConflict(err) {
+			api.HandleInternalError(resp, nil, err)
+			return
+		}
 	}
 	resp.WriteEntity(errors.None)
 }
