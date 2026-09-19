@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -91,6 +92,47 @@ func newRepoReconcilerTestClient(t *testing.T, objects ...runtime.Object) (*Repo
 		WithRuntimeObjects(objects...).Build()
 	recorder := record.NewFakeRecorder(10)
 	return &RepoReconciler{Client: client, recorder: recorder}, recorder
+}
+
+func TestRepoReconcilerConsumeOCIFullRefresh(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		annotations map[string]string
+		want        bool
+		wantStored  map[string]string
+	}{
+		{
+			name:        "consumes full refresh trigger only",
+			annotations: map[string]string{appv2.FullRefreshTriggerAnnotation: "1", "keep": "annotation"},
+			want:        true,
+			wantStored:  map[string]string{"keep": "annotation"},
+		},
+		{
+			name:        "leaves other annotations without trigger",
+			annotations: map[string]string{"keep": "annotation"},
+			wantStored:  map[string]string{"keep": "annotation"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &appv2.Repo{ObjectMeta: metav1.ObjectMeta{Name: "full-refresh-repo", Annotations: tt.annotations}}
+			reconciler, _ := newRepoReconcilerTestClient(t, repo)
+
+			got, err := reconciler.consumeOCIFullRefresh(context.Background(), repo)
+			if err != nil {
+				t.Fatalf("consumeOCIFullRefresh() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("consumeOCIFullRefresh() = %t, want %t", got, tt.want)
+			}
+			stored := &appv2.Repo{}
+			if err := reconciler.Get(context.Background(), types.NamespacedName{Name: repo.Name}, stored); err != nil {
+				t.Fatalf("get stored repo: %v", err)
+			}
+			if !reflect.DeepEqual(stored.Annotations, tt.wantStored) {
+				t.Fatalf("stored annotations = %#v, want %#v", stored.Annotations, tt.wantStored)
+			}
+		})
+	}
 }
 
 func TestRepoReconcilerCreatesApplicationsForMultipleOCICharts(t *testing.T) {
@@ -533,9 +575,10 @@ func TestRepoReconcilerDoesNotLogOCIURLUserinfo(t *testing.T) {
 	}
 }
 
-func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
+func TestRepoReconcilerFullRefreshBypassesCachedOCIChartTagOnce(t *testing.T) {
 	const chartRepo = "charts/demo"
 	const manifestDigest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	manifestRequests := 0
 	configRequests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -544,6 +587,7 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 		case "/v2/" + chartRepo + "/tags/list":
 			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {"1.0.0"}})
 		case "/v2/" + chartRepo + "/manifests/1.0.0":
+			manifestRequests++
 			w.Header().Set("Docker-Content-Digest", manifestDigest)
 			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: registry.ConfigMediaType, Digest: digest.FromString("cached-config")}, Layers: []ocispec.Descriptor{{MediaType: registry.ChartLayerMediaType}}})
 		case "/v2/" + chartRepo + "/blobs/" + digest.FromString("cached-config").String():
@@ -557,7 +601,7 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 	defer server.Close()
 
 	repo := &appv2.Repo{
-		ObjectMeta: metav1.ObjectMeta{Name: "cached-oci-repo"},
+		ObjectMeta: metav1.ObjectMeta{Name: "cached-oci-repo", Annotations: map[string]string{appv2.FullRefreshTriggerAnnotation: "1"}},
 		Spec: appv2.RepoSpec{
 			Url:        fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), chartRepo),
 			Credential: appv2.RepoCredential{PlainHTTP: true},
@@ -598,7 +642,7 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 		t.Fatalf("add application API to scheme: %v", err)
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appv2.Repo{}, &appv2.Application{}, &appv2.ApplicationVersion{}).WithObjects(repo, app, version).Build()
-	reconciler := &RepoReconciler{Client: client, recorder: record.NewFakeRecorder(1)}
+	reconciler := &RepoReconciler{Client: client, recorder: record.NewFakeRecorder(2)}
 
 	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}})
 	if err != nil {
@@ -621,14 +665,55 @@ func TestRepoReconcilerReusesCachedOCIChartTag(t *testing.T) {
 	if !updatedVersion.Spec.Created.Equal(version.Spec.Created) {
 		t.Fatalf("application version Created changed from %v to %v", version.Spec.Created, updatedVersion.Spec.Created)
 	}
-	if configRequests != 0 {
-		t.Fatalf("config requests = %d, want 0 for unchanged manifest digest", configRequests)
+	if manifestRequests != 1 || configRequests != 1 {
+		t.Fatalf("full refresh manifest requests = %d, config requests = %d; want 1 each", manifestRequests, configRequests)
+	}
+	if _, found := updated.Annotations[appv2.FullRefreshTriggerAnnotation]; found {
+		t.Fatal("full refresh trigger annotation remains after reconcile")
+	}
+	updated.Status.State = appv2.StatusManualTrigger
+	if err := reconciler.Status().Update(context.Background(), updated); err != nil {
+		t.Fatalf("trigger normal reconcile: %v", err)
 	}
 	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
 		t.Fatalf("second Reconcile() error = %v", err)
 	}
-	if configRequests != 0 {
-		t.Fatalf("config requests after second reconcile = %d, want 0", configRequests)
+	if manifestRequests != 1 || configRequests != 1 {
+		t.Fatalf("normal reconcile manifest requests = %d, config requests = %d; want no additional requests", manifestRequests, configRequests)
+	}
+}
+
+func TestRepoReconcilerHTTPSDoesNotUseOCILoader(t *testing.T) {
+	var ociRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v2") {
+			ociRequests.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.URL.Path != "/index.yaml" {
+			t.Errorf("unexpected HTTPS repository request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte("apiVersion: v1\nentries: {}\n"))
+	}))
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "https-repo"},
+		Spec: appv2.RepoSpec{
+			Url:        server.URL,
+			SyncPeriod: ptr.To(0),
+		},
+		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	reconciler, _ := newRepoReconcilerTestClient(t, repo)
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if got := ociRequests.Load(); got != 0 {
+		t.Fatalf("OCI requests = %d, want 0 for HTTPS repository", got)
 	}
 }
 

@@ -121,6 +121,18 @@ func (r *RepoReconciler) failRepoSync(ctx context.Context, helmRepo *appv2.Repo,
 	return syncErr
 }
 
+func (r *RepoReconciler) consumeOCIFullRefresh(ctx context.Context, repo *appv2.Repo) (bool, error) {
+	if _, found := repo.Annotations[appv2.FullRefreshTriggerAnnotation]; !found {
+		return false, nil
+	}
+	before := repo.DeepCopy()
+	delete(repo.Annotations, appv2.FullRefreshTriggerAnnotation)
+	if err := r.Patch(ctx, repo, client.MergeFrom(before)); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (r *RepoReconciler) skipSync(helmRepo *appv2.Repo) (bool, error) {
 	logger := r.logger.WithValues("repo", helmRepo.Name)
 	if helmRepo.Status.State == appv2.StatusCreated || helmRepo.Status.State == appv2.StatusManualTrigger || helmRepo.Status.State == appv2.StatusSyncing {
@@ -232,12 +244,20 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	repoURL := helmRepo.Spec.Url
 	if registry.IsOCI(helmRepo.Spec.Url) {
 		repoURL = application.SanitizeOCIURL(repoURL)
+		var fullRefresh bool
+		fullRefresh, err = r.consumeOCIFullRefresh(ctx, helmRepo)
+		if err != nil {
+			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+		}
 		appVersionList := &appv2.ApplicationVersionList{}
 		if err = r.Client.List(ctx, appVersionList, &opts); err != nil {
 			logger.Error(err, "list application versions failed")
 			return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 		}
-		cached := application.BuildOCIChartVersionCache(appList.Items, appVersionList.Items)
+		var cached application.OCIChartVersionCache
+		if !fullRefresh {
+			cached = application.BuildOCIChartVersionCache(appList.Items, appVersionList.Items)
+		}
 		index, indexWarnings, err = application.LoadOCIRepoIndexWithCache(ctx, repoURL, credential, cached)
 		if err == nil && len(index.Entries) == 0 {
 			err = fmt.Errorf("no valid OCI Helm charts found at %s", repoURL)
