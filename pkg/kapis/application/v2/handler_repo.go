@@ -7,6 +7,7 @@ package v2
 
 import (
 	"context"
+	stderrs "errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -21,7 +22,6 @@ import (
 
 	"github.com/emicklei/go-restful/v3"
 	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/util/retry"
@@ -34,6 +34,8 @@ import (
 	"kubesphere.io/kubesphere/pkg/server/errors"
 	"kubesphere.io/kubesphere/pkg/utils/stringutils"
 )
+
+var errFullRefreshRequiresOCI = stderrs.New("full refresh is only supported for OCI repositories")
 
 func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Response) {
 
@@ -166,7 +168,7 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 		return
 	}
 	if fullRefresh && !registry.IsOCI(repo.Spec.Url) {
-		api.HandleBadRequest(resp, req, fmt.Errorf("full refresh is only supported for OCI repositories"))
+		api.HandleBadRequest(resp, req, errFullRefreshRequiresOCI)
 		return
 	}
 	trigger := strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -174,6 +176,9 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 		current := &appv2.Repo{}
 		if err := h.client.Get(req.Request.Context(), key, current); err != nil {
 			return err
+		}
+		if fullRefresh && !registry.IsOCI(current.Spec.Url) {
+			return errFullRefreshRequiresOCI
 		}
 		before := current.DeepCopy()
 		if current.Annotations == nil {
@@ -186,20 +191,12 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 		return h.client.Patch(req.Request.Context(), current, runtimeclient.MergeFrom(before))
 	})
 	if err != nil {
-		api.HandleInternalError(resp, nil, err)
-		return
-	}
-	latest := &appv2.Repo{}
-	if err = h.client.Get(req.Request.Context(), key, latest); err != nil {
-		api.HandleInternalError(resp, nil, err)
-		return
-	}
-	if _, markerStillPending := latest.Annotations[appv2.ManualSyncTriggerAnnotation]; markerStillPending {
-		latest.Status.State = appv2.StatusManualTrigger
-		if err = h.client.Status().Update(req.Request.Context(), latest); err != nil && !apierrors.IsConflict(err) {
-			api.HandleInternalError(resp, nil, err)
+		if stderrs.Is(err, errFullRefreshRequiresOCI) {
+			api.HandleBadRequest(resp, req, err)
 			return
 		}
+		api.HandleInternalError(resp, nil, err)
+		return
 	}
 	resp.WriteEntity(errors.None)
 }
