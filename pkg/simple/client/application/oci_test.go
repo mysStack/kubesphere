@@ -949,6 +949,71 @@ func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsEveryMissingTag(t *testing.T
 	}
 }
 
+func TestLoadOCIRepoIndexWithCacheCachedTagCanBeFullyRefreshed(t *testing.T) {
+	const repository = "charts/demo"
+	const tag = "2.0.0"
+	var manifestRequests atomic.Int32
+	var configRequests atomic.Int32
+	var metadataManifestRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/", "/v2":
+			w.WriteHeader(http.StatusOK)
+		case "/v2/" + repository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {tag, tag + "-metadata"}})
+		case "/v2/" + repository + "/manifests/" + tag:
+			manifestRequests.Add(1)
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:config"))
+		case "/v2/" + repository + "/manifests/" + tag + "-metadata":
+			metadataManifestRequests.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+		case "/v2/" + repository + "/blobs/sha256:config":
+			configRequests.Add(1)
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	host := server.Listener.Addr().String()
+	u := fmt.Sprintf("oci://%s/%s", host, repository)
+	cache := OCIChartVersionCache{
+		ociCacheKey(host, repository, tag): {
+			Metadata: &chart.Metadata{Name: "demo", Version: tag},
+			URLs:     []string{fmt.Sprintf("oci://%s/%s:%s", host, repository, tag)},
+			Digest:   "sha256:cached",
+		},
+	}
+
+	if _, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), u, appv2.RepoCredential{PlainHTTP: true}, cache); err != nil || len(warnings) != 0 {
+		t.Fatalf("cached LoadOCIRepoIndexWithCache() = warnings %v, error %v", warnings, err)
+	}
+	if got := manifestRequests.Load(); got != 0 {
+		t.Fatalf("cached manifest requests = %d, want 0", got)
+	}
+	if got := configRequests.Load(); got != 0 {
+		t.Fatalf("cached config requests = %d, want 0", got)
+	}
+	if got := metadataManifestRequests.Load(); got != 0 {
+		t.Fatalf("metadata manifest requests = %d, want 0", got)
+	}
+
+	if _, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), u, appv2.RepoCredential{PlainHTTP: true}, nil); err != nil || len(warnings) != 0 {
+		t.Fatalf("full LoadOCIRepoIndexWithCache() = warnings %v, error %v", warnings, err)
+	}
+	if got := manifestRequests.Load(); got != 1 {
+		t.Fatalf("full manifest requests = %d, want 1", got)
+	}
+	if got := configRequests.Load(); got != 1 {
+		t.Fatalf("full config requests = %d, want 1", got)
+	}
+	if got := metadataManifestRequests.Load(); got != 0 {
+		t.Fatalf("metadata manifest requests = %d, want 0", got)
+	}
+}
+
 func TestLoadOCIRepoIndexWithCacheDirectRepoInspectsMissingHistoricalTags(t *testing.T) {
 	const repository = "charts/demo"
 	const latestTag = "2.0.0"
