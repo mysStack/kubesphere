@@ -23,17 +23,17 @@ import (
 
 // OCIRepositoryProvider discovers OCI repositories from a source URL.
 type OCIRepositoryProvider interface {
-	Discover(ctx context.Context, source *url.URL, cred appv2.RepoCredential) ([]string, error)
+	Discover(ctx context.Context, source *url.URL, cred appv2.RepoCredential, options OCIIndexOptions) ([]string, error)
 }
 
 type singleChartProvider struct{}
 
-func (singleChartProvider) Discover(ctx context.Context, source *url.URL, cred appv2.RepoCredential) ([]string, error) {
+func (singleChartProvider) Discover(ctx context.Context, source *url.URL, cred appv2.RepoCredential, options OCIIndexOptions) ([]string, error) {
 	repository := ociRepositoryPath(source)
 	if repository == "" {
 		return nil, errors.New("repository name not known")
 	}
-	registry, err := newOCIRegistry(source.String(), cred)
+	registry, err := newOCIRegistry(source.String(), cred, options)
 	if err != nil {
 		return nil, err
 	}
@@ -49,8 +49,8 @@ func (singleChartProvider) Discover(ctx context.Context, source *url.URL, cred a
 
 type distributionCatalogProvider struct{}
 
-func (distributionCatalogProvider) Discover(ctx context.Context, source *url.URL, cred appv2.RepoCredential) ([]string, error) {
-	registry, err := newOCIRegistry(source.String(), cred)
+func (distributionCatalogProvider) Discover(ctx context.Context, source *url.URL, cred appv2.RepoCredential, options OCIIndexOptions) ([]string, error) {
+	registry, err := newOCIRegistry(source.String(), cred, options)
 	if err != nil {
 		return nil, err
 	}
@@ -86,8 +86,8 @@ var errHarborNotFound = errors.New("Harbor endpoint not found")
 
 type harborProjectProvider struct{}
 
-func (harborProjectProvider) Discover(ctx context.Context, source *url.URL, cred appv2.RepoCredential) ([]string, error) {
-	registry, err := newOCIRegistry(source.String(), cred)
+func (harborProjectProvider) Discover(ctx context.Context, source *url.URL, cred appv2.RepoCredential, options OCIIndexOptions) ([]string, error) {
+	registry, err := newOCIRegistry(source.String(), cred, options)
 	if err != nil {
 		return nil, err
 	}
@@ -162,12 +162,18 @@ func (harborProjectProvider) Discover(ctx context.Context, source *url.URL, cred
 
 // DiscoverOCIRepositories discovers a direct chart or child repositories beneath a source URL.
 func DiscoverOCIRepositories(ctx context.Context, source *url.URL, cred appv2.RepoCredential) ([]string, error) {
+	return DiscoverOCIRepositoriesWithOptions(ctx, source, cred, DefaultOCIIndexOptions())
+}
+
+// DiscoverOCIRepositoriesWithOptions discovers repositories using the configured registry request policy.
+func DiscoverOCIRepositoriesWithOptions(ctx context.Context, source *url.URL, cred appv2.RepoCredential, options OCIIndexOptions) ([]string, error) {
 	if source == nil {
 		return nil, errors.New("missing source")
 	}
+	options = options.normalized()
 
 	if ociRepositoryPath(source) != "" {
-		repositories, err := (singleChartProvider{}).Discover(ctx, source, cred)
+		repositories, err := (singleChartProvider{}).Discover(ctx, source, cred, options)
 		if err == nil && len(repositories) > 0 {
 			return repositories, nil
 		}
@@ -175,7 +181,7 @@ func DiscoverOCIRepositories(ctx context.Context, source *url.URL, cred appv2.Re
 			return nil, err
 		}
 
-		repositories, err = (harborProjectProvider{}).Discover(ctx, source, cred)
+		repositories, err = (harborProjectProvider{}).Discover(ctx, source, cred, options)
 		if err == nil {
 			return repositories, nil
 		}
@@ -184,7 +190,7 @@ func DiscoverOCIRepositories(ctx context.Context, source *url.URL, cred appv2.Re
 		}
 	}
 
-	return (distributionCatalogProvider{}).Discover(ctx, source, cred)
+	return (distributionCatalogProvider{}).Discover(ctx, source, cred, options)
 }
 
 func ociRepositoryPath(source *url.URL) string {

@@ -1374,7 +1374,7 @@ func TestLoadOCIRepoIndexWithCache77TagsLimitsMetadataConcurrencyAndAggregatesPa
 	}))
 	defer server.Close()
 
-	index, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repository), appv2.RepoCredential{PlainHTTP: true}, nil)
+	index, warnings, err := LoadOCIRepoIndexWithCache(context.Background(), fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), repository), appv2.RepoCredential{PlainHTTP: true}, nil, OCIIndexOptions{MetadataConcurrency: 2})
 	if err != nil {
 		t.Fatalf("LoadOCIRepoIndexWithCache() error = %v", err)
 	}
@@ -1384,8 +1384,8 @@ func TestLoadOCIRepoIndexWithCache77TagsLimitsMetadataConcurrencyAndAggregatesPa
 	if got := manifestRequests.Load(); got != 77 {
 		t.Fatalf("manifest requests = %d, want 77", got)
 	}
-	if got := peakManifestRequests.Load(); got <= 1 || got > 4 {
-		t.Fatalf("peak manifest requests = %d, want between 2 and 4", got)
+	if got := peakManifestRequests.Load(); got <= 1 || got > 2 {
+		t.Fatalf("peak manifest requests = %d, want between 2 and 2", got)
 	}
 	if len(warnings) != 1 {
 		t.Fatalf("warning count = %d, want 1", len(warnings))

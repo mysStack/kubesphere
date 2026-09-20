@@ -788,6 +788,64 @@ func TestRepoReconcilerFullRefreshBypassesCachedOCIChartTagOnce(t *testing.T) {
 	}
 }
 
+func TestRepoReconcilerRefreshesExpiredOCIChartCacheTimestamp(t *testing.T) {
+	const chartRepo = "charts/demo"
+	const manifestDigest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	server := newOCIControllerServer(t, []ociControllerChartFixture{{
+		repository: chartRepo,
+		tag:        "1.0.0",
+		digest:     manifestDigest,
+		config:     `{"apiVersion":"v2","name":"demo","version":"1.0.0"}`,
+	}})
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-oci-repo", UID: types.UID("repo-uid"), Annotations: map[string]string{
+			appclient.OCICacheTimestampAnnotation: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano),
+		}},
+		Spec: appv2.RepoSpec{
+			Url:        fmt.Sprintf("oci://%s/%s", server.Listener.Addr(), chartRepo),
+			Credential: appv2.RepoCredential{PlainHTTP: true},
+			SyncPeriod: ptr.To(0),
+		},
+		Status: appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	appName := repo.Name + "-" + appclient.GenerateShortNameMD5Hash("demo")
+	app := &appv2.Application{ObjectMeta: metav1.ObjectMeta{
+		Name:        appName,
+		Labels:      map[string]string{appv2.RepoIDLabelKey: repo.Name},
+		Annotations: map[string]string{appv2.AppOriginalNameLabelKey: "demo"},
+	}}
+	version := &appv2.ApplicationVersion{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              appName + "-1.0.0",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Hour)),
+			Labels: map[string]string{
+				appv2.RepoIDLabelKey: repo.Name,
+				appv2.AppIDLabelKey:  appName,
+			},
+		},
+		Spec: appv2.ApplicationVersionSpec{
+			VersionName: "1.0.0",
+			Digest:      manifestDigest,
+			PullUrl:     fmt.Sprintf("oci://%s/%s:1.0.0", server.Listener.Addr(), chartRepo),
+		},
+	}
+	reconciler, _ := newRepoReconcilerTestClient(t, repo, app, version)
+	reconciler.OCIOptions = appclient.OCIIndexOptions{CacheTTL: time.Hour}
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	updated := &appv2.Repo{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: repo.Name}, updated); err != nil {
+		t.Fatalf("get repository: %v", err)
+	}
+	if updated.Annotations[appclient.OCICacheTimestampAnnotation] == "" {
+		t.Fatal("expired OCI cache timestamp was not refreshed")
+	}
+}
+
 func TestRepoReconcilerRequeuesFullRefreshConsumeConflictWithoutIncrementalSync(t *testing.T) {
 	const chartRepo = "charts/demo"
 	var manifestRequests atomic.Int32

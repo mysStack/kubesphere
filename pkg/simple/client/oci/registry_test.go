@@ -93,6 +93,29 @@ func TestFetchManifestDescriptorDoesNotRetryPermanentStatus(t *testing.T) {
 	}
 }
 
+func TestFetchManifestDescriptorRespectsConfiguredRetryAttempts(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	reg := newTestRegistry(t, server)
+	reg, err := NewRegistry(reg.Reference.Registry, WithPlainHTTP(), WithRetryAttempts(2))
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	_, _, err = reg.FetchManifestDescriptor(context.Background(), "charts/example", "1.0.0")
+	if err == nil {
+		t.Fatal("FetchManifestDescriptor() error = nil, want retryable status error")
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
 func TestFetchManifestDescriptorRetryAfterZeroDoesNotDelay(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

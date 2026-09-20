@@ -107,39 +107,41 @@ func defaultConfig() *config {
 
 // Config defines everything needed for apiserver to deal with external services
 type Config struct {
-	KubernetesOptions     *k8s.Options                 `json:"kubernetes,omitempty" yaml:"kubernetes,omitempty" mapstructure:"kubernetes"`
-	CacheOptions          *cache.Options               `json:"cache,omitempty" yaml:"cache,omitempty" mapstructure:"cache"`
-	AuthenticationOptions *authentication.Options      `json:"authentication,omitempty" yaml:"authentication,omitempty" mapstructure:"authentication"`
-	AuthorizationOptions  *authorization.Options       `json:"authorization,omitempty" yaml:"authorization,omitempty" mapstructure:"authorization"`
-	MultiClusterOptions   *multicluster.Options        `json:"multicluster,omitempty" yaml:"multicluster,omitempty" mapstructure:"multicluster"`
-	AuditingOptions       *auditing.Options            `json:"auditing,omitempty" yaml:"auditing,omitempty" mapstructure:"auditing"`
-	KubeconfigOptions     *kubeconfig.Options          `json:"kubeconfig,omitempty" yaml:"kubeconfig,omitempty" mapstructure:"kubeconfig"`
-	TerminalOptions       *terminal.Options            `json:"terminal,omitempty" yaml:"terminal,omitempty" mapstructure:"terminal"`
-	HelmExecutorOptions   *options.HelmExecutorOptions `json:"helmExecutor,omitempty" yaml:"helmExecutor,omitempty" mapstructure:"helmExecutor"`
-	ExtensionOptions      *options.ExtensionOptions    `json:"extension,omitempty" yaml:"extension,omitempty" mapstructure:"extension"`
-	S3Options             *s3.Options                  `json:"s3,omitempty" yaml:"s3,omitempty" mapstructure:"s3"`
-	KubeSphereOptions     *options.KubeSphereOptions   `json:"kubesphere,omitempty" yaml:"kubesphere,omitempty" mapstructure:"kubesphere"`
-	ComposedAppOptions    *composedapp.Options         `json:"composedApp,omitempty" yaml:"composedApp,omitempty" mapstructure:"composedApp"`
-	ExperimentalOptions   *ExperimentalOptions         `json:"experimental,omitempty" yaml:"experimental,omitempty" mapstructure:"experimental"`
+	KubernetesOptions            *k8s.Options                          `json:"kubernetes,omitempty" yaml:"kubernetes,omitempty" mapstructure:"kubernetes"`
+	CacheOptions                 *cache.Options                        `json:"cache,omitempty" yaml:"cache,omitempty" mapstructure:"cache"`
+	AuthenticationOptions        *authentication.Options               `json:"authentication,omitempty" yaml:"authentication,omitempty" mapstructure:"authentication"`
+	AuthorizationOptions         *authorization.Options                `json:"authorization,omitempty" yaml:"authorization,omitempty" mapstructure:"authorization"`
+	MultiClusterOptions          *multicluster.Options                 `json:"multicluster,omitempty" yaml:"multicluster,omitempty" mapstructure:"multicluster"`
+	AuditingOptions              *auditing.Options                     `json:"auditing,omitempty" yaml:"auditing,omitempty" mapstructure:"auditing"`
+	KubeconfigOptions            *kubeconfig.Options                   `json:"kubeconfig,omitempty" yaml:"kubeconfig,omitempty" mapstructure:"kubeconfig"`
+	TerminalOptions              *terminal.Options                     `json:"terminal,omitempty" yaml:"terminal,omitempty" mapstructure:"terminal"`
+	HelmExecutorOptions          *options.HelmExecutorOptions          `json:"helmExecutor,omitempty" yaml:"helmExecutor,omitempty" mapstructure:"helmExecutor"`
+	ExtensionOptions             *options.ExtensionOptions             `json:"extension,omitempty" yaml:"extension,omitempty" mapstructure:"extension"`
+	S3Options                    *s3.Options                           `json:"s3,omitempty" yaml:"s3,omitempty" mapstructure:"s3"`
+	ApplicationRepositoryOptions *options.ApplicationRepositoryOptions `json:"applicationRepository,omitempty" yaml:"applicationRepository,omitempty" mapstructure:"applicationRepository"`
+	KubeSphereOptions            *options.KubeSphereOptions            `json:"kubesphere,omitempty" yaml:"kubesphere,omitempty" mapstructure:"kubesphere"`
+	ComposedAppOptions           *composedapp.Options                  `json:"composedApp,omitempty" yaml:"composedApp,omitempty" mapstructure:"composedApp"`
+	ExperimentalOptions          *ExperimentalOptions                  `json:"experimental,omitempty" yaml:"experimental,omitempty" mapstructure:"experimental"`
 }
 
 // New config creates a default non-empty Config
 func New() *Config {
 	return &Config{
-		KubernetesOptions:     k8s.NewKubernetesOptions(),
-		CacheOptions:          cache.NewCacheOptions(),
-		AuthenticationOptions: authentication.NewOptions(),
-		AuthorizationOptions:  authorization.NewOptions(),
-		MultiClusterOptions:   multicluster.NewOptions(),
-		TerminalOptions:       terminal.NewOptions(),
-		KubeconfigOptions:     kubeconfig.NewOptions(),
-		AuditingOptions:       auditing.NewAuditingOptions(),
-		HelmExecutorOptions:   options.NewHelmExecutorOptions(),
-		ExtensionOptions:      options.NewExtensionOptions(),
-		S3Options:             s3.NewS3Options(),
-		KubeSphereOptions:     options.NewKubeSphereOptions(),
-		ComposedAppOptions:    composedapp.NewOptions(),
-		ExperimentalOptions:   NewExperimentalOptions(),
+		KubernetesOptions:            k8s.NewKubernetesOptions(),
+		CacheOptions:                 cache.NewCacheOptions(),
+		AuthenticationOptions:        authentication.NewOptions(),
+		AuthorizationOptions:         authorization.NewOptions(),
+		MultiClusterOptions:          multicluster.NewOptions(),
+		TerminalOptions:              terminal.NewOptions(),
+		KubeconfigOptions:            kubeconfig.NewOptions(),
+		AuditingOptions:              auditing.NewAuditingOptions(),
+		HelmExecutorOptions:          options.NewHelmExecutorOptions(),
+		ExtensionOptions:             options.NewExtensionOptions(),
+		S3Options:                    s3.NewS3Options(),
+		ApplicationRepositoryOptions: options.NewApplicationRepositoryOptions(),
+		KubeSphereOptions:            options.NewKubeSphereOptions(),
+		ComposedAppOptions:           composedapp.NewOptions(),
+		ExperimentalOptions:          NewExperimentalOptions(),
 	}
 }
 

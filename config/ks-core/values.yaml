@@ -269,6 +269,15 @@ helmExecutor:
             namespaces:
               - kubesphere-system
 
+# OCI 应用仓库的同步请求策略。cacheTTL 为 0s 时仅按仓库同步周期增量同步。
+applicationRepository:
+  oci:
+    metadataConcurrency: 4
+    tagListPageSize: 100
+    requestTimeout: 30s
+    retryAttempts: 3
+    cacheTTL: 0s
+
 composedApp:
   # Selector to filter k8s applications to reconcile
   appSelector: ""

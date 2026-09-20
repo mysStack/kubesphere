@@ -33,9 +33,53 @@ import (
 )
 
 const (
-	ociRequestTimeout      = 30 * time.Second
-	ociMetadataConcurrency = 4
+	defaultOCIRequestTimeout      = 30 * time.Second
+	defaultOCIMetadataConcurrency = 4
+	defaultOCITagListPageSize     = 100
+	defaultOCIRetryAttempts       = 3
+	ociMetadataConcurrency        = defaultOCIMetadataConcurrency
+	// OCICacheTimestampAnnotation records the last successful full OCI metadata validation.
+	OCICacheTimestampAnnotation = "application.kubesphere.io/oci-cache-validated-at"
 )
+
+// OCIIndexOptions controls registry load pressure. CacheTTL is interpreted by
+// the repository controller because it owns the persisted synchronization state.
+type OCIIndexOptions struct {
+	MetadataConcurrency int           `json:"metadataConcurrency,omitempty" yaml:"metadataConcurrency,omitempty" mapstructure:"metadataConcurrency"`
+	TagListPageSize     int           `json:"tagListPageSize,omitempty" yaml:"tagListPageSize,omitempty" mapstructure:"tagListPageSize"`
+	RequestTimeout      time.Duration `json:"requestTimeout,omitempty" yaml:"requestTimeout,omitempty" mapstructure:"requestTimeout"`
+	RetryAttempts       int           `json:"retryAttempts,omitempty" yaml:"retryAttempts,omitempty" mapstructure:"retryAttempts"`
+	CacheTTL            time.Duration `json:"cacheTTL,omitempty" yaml:"cacheTTL,omitempty" mapstructure:"cacheTTL"`
+}
+
+func DefaultOCIIndexOptions() OCIIndexOptions {
+	return OCIIndexOptions{
+		MetadataConcurrency: defaultOCIMetadataConcurrency,
+		TagListPageSize:     defaultOCITagListPageSize,
+		RequestTimeout:      defaultOCIRequestTimeout,
+		RetryAttempts:       defaultOCIRetryAttempts,
+	}
+}
+
+func (options OCIIndexOptions) normalized() OCIIndexOptions {
+	defaults := DefaultOCIIndexOptions()
+	if options.MetadataConcurrency < 1 {
+		options.MetadataConcurrency = defaults.MetadataConcurrency
+	}
+	if options.TagListPageSize < 1 {
+		options.TagListPageSize = defaults.TagListPageSize
+	}
+	if options.RequestTimeout <= 0 {
+		options.RequestTimeout = defaults.RequestTimeout
+	}
+	if options.RetryAttempts < 1 {
+		options.RetryAttempts = defaults.RetryAttempts
+	}
+	if options.CacheTTL < 0 {
+		options.CacheTTL = 0
+	}
+	return options
+}
 
 // ErrNotHelmOCIArtifact indicates that an OCI manifest is not a Helm chart.
 // Callers can safely skip this artifact without treating it as a repository failure.
@@ -198,7 +242,11 @@ func chartMaintainers(maintainers []appv2.Maintainer) []*chart.Maintainer {
 }
 
 // LoadOCIRepoIndexWithCache loads OCI metadata, reusing complete cached versions by tag.
-func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCredential, cached OCIChartVersionCache) (idx helmrepo.IndexFile, warnings []error, err error) {
+func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCredential, cached OCIChartVersionCache, configured ...OCIIndexOptions) (idx helmrepo.IndexFile, warnings []error, err error) {
+	options := DefaultOCIIndexOptions()
+	if len(configured) > 0 {
+		options = configured[0].normalized()
+	}
 	if !registry.IsOCI(u) {
 		return idx, nil, fmt.Errorf("invalid oci URL format: %s", SanitizeOCIURL(u))
 	}
@@ -208,11 +256,11 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 	}
 	parsedURL.User = nil
 	u = parsedURL.String()
-	repoCharts, err := DiscoverOCIRepositories(ctx, parsedURL, cred)
+	repoCharts, err := DiscoverOCIRepositoriesWithOptions(ctx, parsedURL, cred, options)
 	if err != nil {
 		return idx, nil, err
 	}
-	ociRegistry, err := newOCIRegistry(u, cred)
+	ociRegistry, err := newOCIRegistry(u, cred, options)
 	if err != nil {
 		return idx, nil, err
 	}
@@ -225,7 +273,7 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 			continue
 		}
 		directRepository := len(repoCharts) == 1 && repoChart == ociRepositoryPath(parsedURL)
-		chartVersions, inspectionWarnings := loadOCIChartVersions(ctx, ociRegistry, parsedURL.Host, repoChart, semanticOCITags(tags), cached)
+		chartVersions, inspectionWarnings := loadOCIChartVersions(ctx, ociRegistry, parsedURL.Host, repoChart, semanticOCITags(tags), cached, options.MetadataConcurrency)
 		for _, warning := range inspectionWarnings {
 			var indexWarning *OCIIndexWarning
 			historicalChart := errors.As(warning, &indexWarning) && hasOCIChartHistory(cached, parsedURL.Host, repoChart, indexWarning.Tag)
@@ -249,7 +297,11 @@ func hasOCIChartHistory(cached OCIChartVersionCache, host, repository, tag strin
 }
 
 // loadOCIChartVersions adds cached versions without metadata requests and inspects only uncached tags.
-func loadOCIChartVersions(ctx context.Context, reg *oci.Registry, host, repository string, tags []string, cached OCIChartVersionCache) (versions []*helmrepo.ChartVersion, warnings []error) {
+func loadOCIChartVersions(ctx context.Context, reg *oci.Registry, host, repository string, tags []string, cached OCIChartVersionCache, configuredConcurrency ...int) (versions []*helmrepo.ChartVersion, warnings []error) {
+	concurrency := defaultOCIMetadataConcurrency
+	if len(configuredConcurrency) > 0 && configuredConcurrency[0] > 0 {
+		concurrency = configuredConcurrency[0]
+	}
 	tags = append([]string(nil), tags...)
 	sort.Strings(tags)
 	missingTags := make([]string, 0, len(tags))
@@ -273,7 +325,7 @@ func loadOCIChartVersions(ctx context.Context, reg *oci.Registry, host, reposito
 	jobs := make(chan string, len(missingTags))
 	results := make(chan inspectionResult, len(missingTags))
 	var workers sync.WaitGroup
-	for range ociMetadataConcurrency {
+	for range concurrency {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -478,7 +530,11 @@ func newOCIRegistryClient(u string, cred appv2.RepoCredential) (*registry.Client
 	return client, nil
 }
 
-func newOCIRegistry(u string, cred appv2.RepoCredential) (*oci.Registry, error) {
+func newOCIRegistry(u string, cred appv2.RepoCredential, configured ...OCIIndexOptions) (*oci.Registry, error) {
+	options := DefaultOCIIndexOptions()
+	if len(configured) > 0 {
+		options = configured[0].normalized()
+	}
 	parsedURL, err := url.Parse(u)
 	if err != nil {
 		return nil, errors.New("invalid OCI repository URL")
@@ -490,16 +546,18 @@ func newOCIRegistry(u string, cred appv2.RepoCredential) (*oci.Registry, error) 
 		return nil, err
 	}
 
-	options := []oci.RegistryOption{
-		oci.WithTimeout(ociRequestTimeout),
+	registryOptions := []oci.RegistryOption{
+		oci.WithTimeout(options.RequestTimeout),
+		oci.WithRetryAttempts(options.RetryAttempts),
+		oci.WithTagListPageSize(options.TagListPageSize),
 		oci.WithBasicAuth(cred.Username, cred.Password),
 		oci.WithTLSClientConfig(tlsConfig),
 	}
 	if cred.PlainHTTP {
-		options = append(options, oci.WithPlainHTTP())
+		registryOptions = append(registryOptions, oci.WithPlainHTTP())
 	}
 
-	return oci.NewRegistry(parsedURL.Host, options...)
+	return oci.NewRegistry(parsedURL.Host, registryOptions...)
 }
 
 func newOCITLSConfig(cred appv2.RepoCredential) (*tls.Config, error) {

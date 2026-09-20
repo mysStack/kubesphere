@@ -57,6 +57,13 @@ data:
       {{- if .Values.helmExecutor.affinity }}
       affinity: {{- toYaml .Values.helmExecutor.affinity | nindent 8 }}
       {{- end }}
+    applicationRepository:
+      oci:
+        metadataConcurrency: {{ .Values.applicationRepository.oci.metadataConcurrency }}
+        tagListPageSize: {{ .Values.applicationRepository.oci.tagListPageSize }}
+        requestTimeout: {{ .Values.applicationRepository.oci.requestTimeout }}
+        retryAttempts: {{ .Values.applicationRepository.oci.retryAttempts }}
+        cacheTTL: {{ .Values.applicationRepository.oci.cacheTTL }}
     extension:
       imageRegistry: {{ default .Values.extension.imageRegistry "" | quote }}
       {{- if .Values.extension.nodeSelector }}

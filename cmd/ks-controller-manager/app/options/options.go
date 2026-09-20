@@ -171,6 +171,9 @@ func (s *ControllerManagerOptions) Merge(conf *config.Config) {
 	if conf.S3Options != nil {
 		s.S3Options = conf.S3Options
 	}
+	if conf.ApplicationRepositoryOptions != nil {
+		s.ApplicationRepositoryOptions = conf.ApplicationRepositoryOptions
+	}
 }
 
 func (s *ControllerManagerOptions) NewControllerManager() (*controller.Manager, error) {

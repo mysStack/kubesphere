@@ -53,14 +53,14 @@
 - [x] 建立按 Repo、tag 的 OCI metadata 缓存，并保留已同步版本的 manifest digest，避免每次定时同步全量重新拉取。
 - [x] 对新增 tag 和已缓存版本执行增量同步。
 - [x] 提供 OCI 显式全量校验；本次同步重新读取已缓存 tag 的 metadata，完成后恢复默认缓存行为。
-- [ ] 明确删除或失效 tag 的清理策略：当前无 warning 的完整索引会删除缺失的 ApplicationVersion；仅产生 warning 的部分 OCI 同步会保留既有版本。
+- [x] 删除或失效 tag 清理策略：本轮 OCI 索引无 warning 时删除缺失的 Application 与 ApplicationVersion；任一 tag 产生 warning 时视为部分结果，保留既有数据，避免瞬时网络或限流误删。
 - [x] 辅助 Artifact 在 tag 过滤阶段跳过，manifest 校验失败只记录单版本警告，不阻塞其他版本。
 - [x] 为 429、5xx、超时实现有限次数重试和退避；认证错误、TLS 错误、404 不重复重试。
-- [ ] 将同步并发、批大小、请求超时、缓存 TTL 和重试次数配置化，并设置安全默认值。
+- [x] 将同步并发、tag 分页大小、请求超时、缓存 TTL 和重试次数配置化，并设置安全默认值。
 - [ ] 增加仓库健康信息：远端版本数、有效 Chart 数、跳过数、失败数、请求数、最近同步耗时。
 - [x] 增加离线 Registry Mock 测试：77 个版本、metadata Artifact、429、慢响应、重复 digest、部分失败。
 
-当前默认值：metadata 请求并发上限为 4、单次请求超时 30 秒；429/5xx/超时最多尝试 3 次，退避为 200ms、500ms，并优先遵循 `Retry-After`。默认同步假定 OCI tag 不可变，已缓存 tag 不会重新拉取 manifest；需要重新校验旧 tag 时，使用 OCI 仓库的“全量校验”动作一次性绕过缓存，下一次默认同步恢复缓存。
+当前默认值：metadata 请求并发上限为 4、tag 分页大小为 100、单次请求超时 30 秒；429/5xx/超时最多尝试 3 次，退避为 200ms、500ms，并优先遵循 `Retry-After`。`applicationRepository.oci.cacheTTL` 默认为 `0s`，不会额外触发全量请求；设置为正值后，过期的 Repo 在下一次正常或手动同步时做一次全量 metadata 校验，只有无 warning 的完整结果才更新 `application.kubesphere.io/oci-cache-validated-at`。默认同步假定 OCI tag 不可变，已缓存 tag 不会重新拉取 manifest；需要重新校验旧 tag 时，也可使用 OCI 仓库的“全量校验”动作一次性绕过缓存，下一次默认同步恢复缓存。
 
 验收标准：重复同步主要命中缓存；同一 Registry 多仓库不会无限并发；429 不导致整个 Repo 进入不可恢复状态；同步结果可解释、可重试、可观测。
 
