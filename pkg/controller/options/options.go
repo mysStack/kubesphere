@@ -18,20 +18,31 @@ import (
 	"kubesphere.io/kubesphere/pkg/models/kubeconfig"
 	"kubesphere.io/kubesphere/pkg/models/terminal"
 	"kubesphere.io/kubesphere/pkg/multicluster"
+	applicationclient "kubesphere.io/kubesphere/pkg/simple/client/application"
 	"kubesphere.io/kubesphere/pkg/simple/client/k8s"
 )
 
 type Options struct {
-	KubernetesOptions     *k8s.Options
-	AuthenticationOptions *authentication.Options
-	MultiClusterOptions   *multicluster.Options
-	KubeconfigOptions     *kubeconfig.Options
-	TerminalOptions       *terminal.Options
-	ComposedAppOptions    *composedapp.Options
-	HelmExecutorOptions   *HelmExecutorOptions
-	ExtensionOptions      *ExtensionOptions
-	KubeSphereOptions     *KubeSphereOptions
-	S3Options             *s3.Options
+	KubernetesOptions            *k8s.Options
+	AuthenticationOptions        *authentication.Options
+	MultiClusterOptions          *multicluster.Options
+	KubeconfigOptions            *kubeconfig.Options
+	TerminalOptions              *terminal.Options
+	ComposedAppOptions           *composedapp.Options
+	HelmExecutorOptions          *HelmExecutorOptions
+	ExtensionOptions             *ExtensionOptions
+	KubeSphereOptions            *KubeSphereOptions
+	S3Options                    *s3.Options
+	ApplicationRepositoryOptions *ApplicationRepositoryOptions
+}
+
+type ApplicationRepositoryOptions struct {
+	OCI *applicationclient.OCIIndexOptions `json:"oci,omitempty" yaml:"oci,omitempty" mapstructure:"oci"`
+}
+
+func NewApplicationRepositoryOptions() *ApplicationRepositoryOptions {
+	defaults := applicationclient.DefaultOCIIndexOptions()
+	return &ApplicationRepositoryOptions{OCI: &defaults}
 }
 
 type HelmExecutorOptions struct {

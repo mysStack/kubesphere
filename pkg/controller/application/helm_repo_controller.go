@@ -46,9 +46,10 @@ var _ kscontroller.Controller = &RepoReconciler{}
 type RepoReconciler struct {
 	recorder record.EventRecorder
 	client.Client
-	ossStore s3.Interface
-	cmStore  s3.Interface
-	logger   logr.Logger
+	ossStore   s3.Interface
+	cmStore    s3.Interface
+	logger     logr.Logger
+	OCIOptions application.OCIIndexOptions
 }
 
 func (r *RepoReconciler) Name() string {
@@ -79,6 +80,9 @@ func (r *RepoReconciler) SetupWithManager(mgr *kscontroller.Manager) (err error)
 	r.Client = mgr.GetClient()
 	r.recorder = mgr.GetEventRecorderFor(helmRepoController)
 	r.logger = ctrl.Log.WithName("controllers").WithName(helmRepoController)
+	if mgr.Options.ApplicationRepositoryOptions != nil && mgr.Options.ApplicationRepositoryOptions.OCI != nil {
+		r.OCIOptions = *mgr.Options.ApplicationRepositoryOptions.OCI
+	}
 	r.cmStore, r.ossStore, err = application.InitStore(mgr.Options.S3Options, r.Client)
 	if err != nil {
 		r.logger.Error(err, "failed to init store")
@@ -153,6 +157,23 @@ func (r *RepoReconciler) skipSync(helmRepo *appv2.Repo) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+func (r *RepoReconciler) ociCacheTTLExpired(repo *appv2.Repo) bool {
+	if r.OCIOptions.CacheTTL <= 0 {
+		return false
+	}
+	validatedAt, err := time.Parse(time.RFC3339Nano, repo.Annotations[application.OCICacheTimestampAnnotation])
+	return err != nil || time.Since(validatedAt) >= r.OCIOptions.CacheTTL
+}
+
+func (r *RepoReconciler) markOCICacheValidated(ctx context.Context, repo *appv2.Repo) error {
+	before := repo.DeepCopy()
+	if repo.Annotations == nil {
+		repo.Annotations = map[string]string{}
+	}
+	repo.Annotations[application.OCICacheTimestampAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+	return r.Patch(ctx, repo, client.MergeFrom(before))
 }
 
 func filterVersions(versions []*helmrepo.ChartVersion) []*helmrepo.ChartVersion {
@@ -233,6 +254,9 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 			return reconcile.Result{RequeueAfter: requeueAfter}, nil
 		}
 	}
+	if registry.IsOCI(helmRepo.Spec.Url) && !fullRefresh && r.ociCacheTTLExpired(helmRepo) {
+		fullRefresh = true
+	}
 
 	helmRepo.Status.State = appv2.StatusSyncing
 	err = r.UpdateStatus(ctx, helmRepo)
@@ -271,7 +295,7 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		if fullRefresh {
 			cached = cached.ForFullRefresh()
 		}
-		index, indexWarnings, err = application.LoadOCIRepoIndexWithCache(ctx, repoURL, credential, cached)
+		index, indexWarnings, err = application.LoadOCIRepoIndexWithCache(ctx, repoURL, credential, cached, r.OCIOptions)
 		if err == nil && len(index.Entries) == 0 {
 			err = fmt.Errorf("no valid OCI Helm charts found at %s", repoURL)
 		}
@@ -358,6 +382,12 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	if err != nil {
 		logger.Error(err, "update status failed")
 		return reconcile.Result{}, err
+	}
+	if registry.IsOCI(helmRepo.Spec.Url) && fullRefresh && len(indexWarnings) == 0 {
+		if err := r.markOCICacheValidated(ctx, helmRepo); err != nil {
+			logger.Error(err, "mark OCI metadata cache validated failed")
+			return reconcile.Result{}, err
+		}
 	}
 
 	r.recorder.Eventf(helmRepo, corev1.EventTypeNormal, "Synced", "HelmRepo %s synced successfully", helmRepo.GetName())

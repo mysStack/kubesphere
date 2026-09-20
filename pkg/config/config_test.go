@@ -28,20 +28,21 @@ import (
 
 func newTestConfig() (*Config, error) {
 	var conf = &Config{
-		KubernetesOptions:     k8s.NewKubernetesOptions(),
-		CacheOptions:          cache.NewCacheOptions(),
-		AuthorizationOptions:  authorization.NewOptions(),
-		AuthenticationOptions: authentication.NewOptions(),
-		MultiClusterOptions:   multicluster.NewOptions(),
-		AuditingOptions:       auditing.NewAuditingOptions(),
-		KubeconfigOptions:     kubeconfig.NewOptions(),
-		TerminalOptions:       terminal.NewOptions(),
-		HelmExecutorOptions:   options.NewHelmExecutorOptions(),
-		ExtensionOptions:      options.NewExtensionOptions(),
-		S3Options:             s3.NewS3Options(),
-		KubeSphereOptions:     options.NewKubeSphereOptions(),
-		ComposedAppOptions:    &composedapp.Options{},
-		ExperimentalOptions:   NewExperimentalOptions(),
+		KubernetesOptions:            k8s.NewKubernetesOptions(),
+		CacheOptions:                 cache.NewCacheOptions(),
+		AuthorizationOptions:         authorization.NewOptions(),
+		AuthenticationOptions:        authentication.NewOptions(),
+		MultiClusterOptions:          multicluster.NewOptions(),
+		AuditingOptions:              auditing.NewAuditingOptions(),
+		KubeconfigOptions:            kubeconfig.NewOptions(),
+		TerminalOptions:              terminal.NewOptions(),
+		HelmExecutorOptions:          options.NewHelmExecutorOptions(),
+		ExtensionOptions:             options.NewExtensionOptions(),
+		S3Options:                    s3.NewS3Options(),
+		ApplicationRepositoryOptions: options.NewApplicationRepositoryOptions(),
+		KubeSphereOptions:            options.NewKubeSphereOptions(),
+		ComposedAppOptions:           &composedapp.Options{},
+		ExperimentalOptions:          NewExperimentalOptions(),
 	}
 	return conf, nil
 }
@@ -85,5 +86,27 @@ func TestGet(t *testing.T) {
 	}
 	if diff := cmp.Diff(conf, conf2); diff != "" {
 		t.Fatal(diff)
+	}
+}
+
+func TestApplicationRepositoryOCIOptionsUnmarshal(t *testing.T) {
+	conf := &Config{}
+	if err := yaml.Unmarshal([]byte(`
+applicationRepository:
+  oci:
+    metadataConcurrency: 2
+    tagListPageSize: 50
+    requestTimeout: 45s
+    retryAttempts: 4
+    cacheTTL: 24h
+`), conf); err != nil {
+		t.Fatalf("unmarshal configuration: %v", err)
+	}
+	if conf.ApplicationRepositoryOptions == nil || conf.ApplicationRepositoryOptions.OCI == nil {
+		t.Fatal("application repository OCI options were not decoded")
+	}
+	options := conf.ApplicationRepositoryOptions.OCI
+	if options.MetadataConcurrency != 2 || options.TagListPageSize != 50 || options.RequestTimeout.String() != "45s" || options.RetryAttempts != 4 || options.CacheTTL.String() != "24h0m0s" {
+		t.Fatalf("OCI options = %#v", options)
 	}
 }

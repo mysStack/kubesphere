@@ -25,7 +25,7 @@ import (
 type RepositoryOptions remote.Repository
 type RegistryOption func(*Registry)
 
-const retryAttempts = 3
+const defaultRetryAttempts = 3
 
 var retryDelays = []time.Duration{200 * time.Millisecond, 500 * time.Millisecond}
 
@@ -46,11 +46,12 @@ func (e *registryResponseError) Unwrap() error {
 }
 
 type retryClient struct {
-	client remote.Client
+	client        remote.Client
+	retryAttempts int
 }
 
 func (c retryClient) Do(req *http.Request) (*http.Response, error) {
-	resp, err := retry(req.Context(), retryAttempts, func() (*http.Response, error) {
+	resp, err := retry(req.Context(), c.retryAttempts, func() (*http.Response, error) {
 		return c.client.Do(req)
 	})
 	if err != nil || resp == nil || resp.StatusCode < http.StatusBadRequest {
@@ -71,6 +72,7 @@ type Registry struct {
 	username              string
 	password              string
 	timeout               time.Duration
+	retryAttempts         int
 	insecureSkipVerifyTLS bool
 	tlsClientConfig       *tls.Config
 }
@@ -83,9 +85,7 @@ func NewRegistry(name string, options ...RegistryOption) (*Registry, error) {
 		return nil, err
 	}
 
-	reg := &Registry{RepositoryOptions: RepositoryOptions{
-		Reference: ref,
-	}}
+	reg := &Registry{RepositoryOptions: RepositoryOptions{Reference: ref}, retryAttempts: defaultRetryAttempts}
 	for _, option := range options {
 		option(reg)
 	}
@@ -133,6 +133,22 @@ func WithTimeout(timeout time.Duration) RegistryOption {
 	}
 }
 
+func WithRetryAttempts(attempts int) RegistryOption {
+	return func(reg *Registry) {
+		if attempts > 0 {
+			reg.retryAttempts = attempts
+		}
+	}
+}
+
+func WithTagListPageSize(size int) RegistryOption {
+	return func(reg *Registry) {
+		if size > 0 {
+			reg.RepositoryOptions.TagListPageSize = size
+		}
+	}
+}
+
 func WithInsecureSkipVerifyTLS(insecureSkipVerifyTLS bool) RegistryOption {
 	return func(reg *Registry) {
 		reg.insecureSkipVerifyTLS = insecureSkipVerifyTLS
@@ -164,7 +180,7 @@ func (r *Registry) do(req *http.Request) (*http.Response, error) {
 }
 
 func (r *Registry) doWithRetry(req *http.Request) (*http.Response, error) {
-	return retry(req.Context(), retryAttempts, func() (*http.Response, error) {
+	return retry(req.Context(), r.retryAttempts, func() (*http.Response, error) {
 		return r.do(req)
 	})
 }
@@ -483,7 +499,7 @@ func readBounded(reader io.Reader, maxBytes int64) ([]byte, error) {
 
 func (r *Registry) repository(repo *remote.Repository) *remote.Repository {
 	return &remote.Repository{
-		Client:               retryClient{client: r.client()},
+		Client:               retryClient{client: r.client(), retryAttempts: r.retryAttempts},
 		Reference:            repo.Reference,
 		PlainHTTP:            repo.PlainHTTP,
 		ManifestMediaTypes:   slices.Clone(repo.ManifestMediaTypes),
