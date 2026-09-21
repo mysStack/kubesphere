@@ -11,6 +11,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"kubesphere.io/kubesphere/pkg/simple/client/application"
+	"kubesphere.io/kubesphere/pkg/simple/client/k8s"
 
 	"kubesphere.io/utils/s3"
 
@@ -25,15 +26,17 @@ import (
 
 type appHandler struct {
 	client        runtimeclient.Client
+	kubeClient    k8s.Client
 	clusterClient clusterclient.Interface
 	s3opts        *s3.Options
 	ossStore      s3.Interface
 	cmStore       s3.Interface
 }
 
-func NewHandler(cacheClient runtimeclient.Client, clusterClient clusterclient.Interface, s3opts *s3.Options) rest.Handler {
+func NewHandler(cacheClient runtimeclient.Client, kubeClient k8s.Client, clusterClient clusterclient.Interface, s3opts *s3.Options) rest.Handler {
 	handler := &appHandler{
 		client:        cacheClient,
+		kubeClient:    kubeClient,
 		clusterClient: clusterClient,
 		s3opts:        s3opts,
 	}
