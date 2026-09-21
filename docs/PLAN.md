@@ -32,6 +32,7 @@
 - [x] OCI 请求超时、TLS、Basic Auth、Client Certificate、Plain HTTP 测试覆盖。
 - [x] Console 增加“立即同步”入口，后端同步保持异步执行。
 - [x] 前后端个人镜像 Action 已配置，并完成测试环境构建和部署验证。
+- [~] P0：私有 Helm/OCI 仓库凭据管理。Console 支持创建或选择受 Workspace 边界保护的仓库凭据；Repo 仅保存 Secret 引用，验证、同步和部署复用该引用，凭据不回传、不出现在 URL、Status、Event 或日志中。
 - [ ] 扩展 Repo 状态：同步开始时间、结束时间、耗时、版本数量、缓存命中数、最近错误。
 - [ ] 为 OCI 失败场景补充可读的 Status Reason、Kubernetes Event 和 Console 错误展示。
 
@@ -44,6 +45,12 @@
 - 前端 Action 已成功同时推送 Docker Hub 和 GHCR 镜像，构建记录：[Build Personal Console Image](https://github.com/mysStack/console/actions/runs/35314311819)。
 - 测试环境 `ks-console` Deployment 已滚动更新至前端测试镜像，Pod 为 `1/1 Running`，NodePort 根路径返回 HTTP 200。
 - Console“立即同步”已完成异步触发验证；OCI 全量缓存、增量同步、限流退避和详细进度状态仍属于阶段二、三，尚未标记完成。
+
+私有仓库优先级说明（2026-09-20）：
+
+- Controller 已支持 `credentialSecretRef`，并在仓库验证、同步和部署下载 Chart 时复用凭据；管理员可通过受控 Secret 配置私有仓库。
+- 当前 Console 没有安全的凭据管理入口。不能让 Workspace 用户直接选择 `kubesphere-system` 的任意 Secret，否则会突破 Secret 的所有权边界。
+- 若私有仓库是日常使用场景，本项应排在仓库健康信息之前；先设计专用凭据 API、Workspace 归属校验和 Console 表单，再继续观测信息展示。
 
 ## 阶段二：OCI 性能、缓存和限流
 
