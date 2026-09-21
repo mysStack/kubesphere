@@ -43,13 +43,14 @@ func TestDownLoadChartUsesRepoCredentialSecret(t *testing.T) {
 		t.Fatalf("add application API to scheme: %v", err)
 	}
 	repo := &appv2.Repo{
-		ObjectMeta: metav1.ObjectMeta{Name: "private-oci"},
+		ObjectMeta: metav1.ObjectMeta{Name: "private-oci", Labels: map[string]string{constants.WorkspaceLabelKey: appv2.SystemWorkspace}},
 		Spec: appv2.RepoSpec{
 			CredentialSecretRef: &corev1.SecretReference{Name: "repo-cred"},
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: constants.KubeSphereNamespace, Name: "repo-cred"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: constants.KubeSphereNamespace, Name: "repo-cred", Labels: map[string]string{RepoCredentialLabelKey: "true", constants.WorkspaceLabelKey: appv2.SystemWorkspace}},
+		Type:       corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			"username":  []byte(username),
 			"password":  []byte(password),
@@ -98,7 +99,7 @@ func TestFailOverGetKeepsOriginalOCITag(t *testing.T) {
 		t.Fatalf("add application API to scheme: %v", err)
 	}
 	repo := &appv2.Repo{
-		ObjectMeta: metav1.ObjectMeta{Name: "private-oci"},
+		ObjectMeta: metav1.ObjectMeta{Name: "private-oci", Labels: map[string]string{constants.WorkspaceLabelKey: appv2.SystemWorkspace}},
 		Spec:       appv2.RepoSpec{CredentialSecretRef: &corev1.SecretReference{Name: "repo-cred"}},
 	}
 	appVersion := &appv2.ApplicationVersion{
@@ -106,7 +107,8 @@ func TestFailOverGetKeepsOriginalOCITag(t *testing.T) {
 		Spec:       appv2.ApplicationVersionSpec{VersionName: "1.1.0+build.1", PullUrl: fmt.Sprintf("oci://%s/charts/demo:%s", server.Listener.Addr(), tag)},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: constants.KubeSphereNamespace, Name: "repo-cred"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: constants.KubeSphereNamespace, Name: "repo-cred", Labels: map[string]string{RepoCredentialLabelKey: "true", constants.WorkspaceLabelKey: appv2.SystemWorkspace}},
+		Type:       corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			"username":  []byte(username),
 			"password":  []byte(password),

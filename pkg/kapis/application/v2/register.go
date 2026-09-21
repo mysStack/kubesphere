@@ -63,6 +63,9 @@ func (h *appHandler) AddToContainer(c *restful.Container) (err error) {
 		return err
 	}
 	funcInfoList := []funcInfo{
+		{Route: "/repo-credentials", Func: h.ListRepoCredentials, Method: ws.GET, Workspace: true},
+		{Route: "/repo-credentials", Func: h.CreateRepoCredential, Method: ws.POST, Workspace: true},
+		{Route: "/repo-credentials/{credential}", Func: h.DeleteRepoCredential, Method: ws.DELETE, Workspace: true},
 		{Route: "/repos", Func: h.ListRepos, Method: ws.GET, Workspace: true},
 		{Route: "/repos", Func: h.CreateOrUpdateRepo, Method: ws.POST, Workspace: true},
 		{Route: "/repos/{repo}", Func: h.CreateOrUpdateRepo, Method: ws.PATCH, Workspace: true},

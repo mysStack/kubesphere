@@ -72,6 +72,17 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 		parsedUrl.User = nil
 		repoRequest.Spec.Url = parsedUrl.String()
 	}
+	workspace := repoCredentialWorkspace(req)
+	if repoRequest.Spec.CredentialSecretRef != nil {
+		if hasInlineRepoCredential(repoRequest.Spec.Credential) {
+			api.HandleBadRequest(resp, req, fmt.Errorf("credential and credentialSecretRef cannot be used together"))
+			return
+		}
+		if err := application.ValidateRepoCredentialSecretRef(req.Request.Context(), h.client, workspace, repoRequest.Spec.CredentialSecretRef); requestDone(err, resp) {
+			return
+		}
+		repoRequest.Spec.CredentialSecretRef.Namespace = constants.KubeSphereNamespace
+	}
 
 	if req.QueryParameter("validate") != "" {
 		credential := repoRequest.Spec.Credential
@@ -117,7 +128,7 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 		if repo.GetLabels() == nil {
 			repo.SetLabels(map[string]string{})
 		}
-		repo.Labels[constants.WorkspaceLabelKey] = repoRequest.Labels[constants.WorkspaceLabelKey]
+		repo.Labels[constants.WorkspaceLabelKey] = workspace
 
 		if repo.GetAnnotations() == nil {
 			repo.SetAnnotations(map[string]string{})
@@ -139,6 +150,10 @@ func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Resp
 
 func (h *appHandler) loadRepoCredentialSecret(ctx context.Context, ref *v1.SecretReference, credential *appv2.RepoCredential) error {
 	return application.LoadRepoCredentialSecret(ctx, h.client, ref, credential)
+}
+
+func hasInlineRepoCredential(credential appv2.RepoCredential) bool {
+	return credential.Username != "" || credential.Password != "" || credential.CertFile != "" || credential.KeyFile != "" || credential.CAFile != "" || credential.InsecureSkipTLSVerify != nil || credential.PlainHTTP
 }
 
 func (h *appHandler) DeleteRepo(req *restful.Request, resp *restful.Response) {
@@ -221,6 +236,7 @@ func (h *appHandler) DescribeRepo(req *restful.Request, resp *restful.Response) 
 		return
 	}
 	repo.SetManagedFields(nil)
+	repo.Spec.Credential = appv2.RepoCredential{}
 
 	resp.WriteEntity(repo)
 }
@@ -239,6 +255,7 @@ func (h *appHandler) ListRepos(req *restful.Request, resp *restful.Response) {
 		if !stringutils.StringIn(repo.Labels[constants.WorkspaceLabelKey], allowList) {
 			continue
 		}
+		repo.Spec.Credential = appv2.RepoCredential{}
 		filteredList.Items = append(filteredList.Items, repo)
 	}
 

@@ -153,6 +153,9 @@ func DownLoadChart(cli runtimeclient.Client, pullUrl, repoName string) (data []b
 		return data, err
 	}
 	credential := repo.Spec.Credential
+	if err := ValidateRepoCredentialSecretRef(context.TODO(), cli, repo.GetWorkspace(), repo.Spec.CredentialSecretRef); err != nil {
+		return data, err
+	}
 	if err := LoadRepoCredentialSecret(context.TODO(), cli, repo.Spec.CredentialSecretRef, &credential); err != nil {
 		return data, err
 	}
