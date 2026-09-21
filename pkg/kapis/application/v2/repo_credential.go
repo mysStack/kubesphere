@@ -43,6 +43,18 @@ func repoCredentialMetadata(secret corev1.Secret) repoCredentialPayload {
 
 func (h *appHandler) ListRepoCredentials(req *restful.Request, resp *restful.Response) {
 	workspace := repoCredentialWorkspace(req)
+	if h.kubeClient != nil {
+		list, err := h.kubeClient.CoreV1().Secrets(constants.KubeSphereNamespace).List(req.Request.Context(), metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=true,%s=%s", application.RepoCredentialLabelKey, constants.WorkspaceLabelKey, workspace)})
+		if requestDone(err, resp) {
+			return
+		}
+		items := make([]repoCredentialPayload, 0, len(list.Items))
+		for _, secret := range list.Items {
+			items = append(items, repoCredentialMetadata(secret))
+		}
+		resp.WriteEntity(map[string]any{"items": items})
+		return
+	}
 	list := &corev1.SecretList{}
 	selector := labels.SelectorFromSet(labels.Set{
 		application.RepoCredentialLabelKey: "true",
@@ -80,7 +92,13 @@ func (h *appHandler) CreateRepoCredential(req *restful.Request, resp *restful.Re
 		Type:       corev1.SecretTypeOpaque,
 		StringData: map[string]string{"username": payload.Credential.Username, "password": payload.Credential.Password},
 	}
-	if err := h.client.Create(req.Request.Context(), secret); err != nil {
+	var err error
+	if h.kubeClient != nil {
+		_, err = h.kubeClient.CoreV1().Secrets(constants.KubeSphereNamespace).Create(req.Request.Context(), secret, metav1.CreateOptions{})
+	} else {
+		err = h.client.Create(req.Request.Context(), secret)
+	}
+	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			api.HandleConflict(resp, req, fmt.Errorf("repository credential %q already exists", payload.Metadata.Name))
 			return
@@ -107,7 +125,13 @@ func (h *appHandler) DeleteRepoCredential(req *restful.Request, resp *restful.Re
 	if err := application.ValidateRepoCredentialSecretRef(req.Request.Context(), h.client, workspace, &corev1.SecretReference{Name: name}); requestDone(err, resp) {
 		return
 	}
-	if err := h.client.Delete(req.Request.Context(), secret); requestDone(err, resp) {
+	var err error
+	if h.kubeClient != nil {
+		err = h.kubeClient.CoreV1().Secrets(constants.KubeSphereNamespace).Delete(req.Request.Context(), name, metav1.DeleteOptions{})
+	} else {
+		err = h.client.Delete(req.Request.Context(), secret)
+	}
+	if requestDone(err, resp) {
 		return
 	}
 	resp.WriteEntity(map[string]any{})
