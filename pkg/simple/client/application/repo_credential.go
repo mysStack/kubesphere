@@ -18,6 +18,44 @@ import (
 	"kubesphere.io/kubesphere/pkg/constants"
 )
 
+const RepoCredentialLabelKey = "application.kubesphere.io/repo-credential"
+
+// NormalizeRepoCredentialWorkspace returns the workspace used by global application repositories.
+func NormalizeRepoCredentialWorkspace(workspace string) string {
+	if workspace == "" {
+		return appv2.SystemWorkspace
+	}
+	return workspace
+}
+
+// ValidateRepoCredentialSecretRef ensures a repository can only use a credential created for its workspace.
+func ValidateRepoCredentialSecretRef(ctx context.Context, reader client.Reader, workspace string, ref *corev1.SecretReference) error {
+	if ref == nil {
+		return nil
+	}
+	if ref.Name == "" {
+		return fmt.Errorf("credentialSecretRef.name is required")
+	}
+	if ref.Namespace != "" && ref.Namespace != constants.KubeSphereNamespace {
+		return fmt.Errorf("credentialSecretRef.namespace must be %q", constants.KubeSphereNamespace)
+	}
+
+	secret := &corev1.Secret{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: constants.KubeSphereNamespace, Name: ref.Name}, secret); err != nil {
+		return err
+	}
+	if secret.Type != corev1.SecretTypeOpaque {
+		return fmt.Errorf("credential secret %q must be Opaque", ref.Name)
+	}
+	if secret.Labels[RepoCredentialLabelKey] != "true" {
+		return fmt.Errorf("secret %q is not a repository credential", ref.Name)
+	}
+	if secret.Labels[constants.WorkspaceLabelKey] != NormalizeRepoCredentialWorkspace(workspace) {
+		return fmt.Errorf("credential secret %q does not belong to this workspace", ref.Name)
+	}
+	return nil
+}
+
 // LoadRepoCredentialSecret overlays a repo credential with values stored in its Secret reference.
 func LoadRepoCredentialSecret(ctx context.Context, reader client.Reader, ref *corev1.SecretReference, credential *appv2.RepoCredential) error {
 	if ref == nil {

@@ -267,6 +267,9 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	}
 
 	credential := helmRepo.Spec.Credential
+	if err := application.ValidateRepoCredentialSecretRef(ctx, r.Client, helmRepo.GetWorkspace(), helmRepo.Spec.CredentialSecretRef); err != nil {
+		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+	}
 	if err := application.LoadRepoCredentialSecret(ctx, r.Client, helmRepo.Spec.CredentialSecretRef, &credential); err != nil {
 		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
 	}
