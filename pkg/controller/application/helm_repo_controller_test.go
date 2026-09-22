@@ -17,10 +17,8 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"helm.sh/helm/v3/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -40,14 +38,26 @@ type ociControllerChartFixture struct {
 	config     string
 }
 
-type conflictOnceRepoPatchClient struct {
+type concurrentTriggerRepoPatchClient struct {
 	ctrlclient.Client
-	conflicted atomic.Bool
+	triggered atomic.Bool
 }
 
-func (c *conflictOnceRepoPatchClient) Patch(ctx context.Context, obj ctrlclient.Object, patch ctrlclient.Patch, opts ...ctrlclient.PatchOption) error {
-	if _, isRepo := obj.(*appv2.Repo); isRepo && c.conflicted.CompareAndSwap(false, true) {
-		return apierrors.NewConflict(schema.GroupResource{Group: appv2.GroupName, Resource: "repos"}, obj.GetName(), fmt.Errorf("injected conflict"))
+func (c *concurrentTriggerRepoPatchClient) Patch(ctx context.Context, obj ctrlclient.Object, patch ctrlclient.Patch, opts ...ctrlclient.PatchOption) error {
+	if repo, ok := obj.(*appv2.Repo); ok && c.triggered.CompareAndSwap(false, true) {
+		current := &appv2.Repo{}
+		if err := c.Client.Get(ctx, ctrlclient.ObjectKeyFromObject(repo), current); err != nil {
+			return err
+		}
+		before := current.DeepCopy()
+		if current.Annotations == nil {
+			current.Annotations = map[string]string{}
+		}
+		current.Annotations[appv2.ManualSyncTriggerAnnotation] = "request-2"
+		current.Annotations[appv2.FullRefreshTriggerAnnotation] = "request-2"
+		if err := c.Client.Patch(ctx, current, ctrlclient.MergeFrom(before)); err != nil {
+			return err
+		}
 	}
 	return c.Client.Patch(ctx, obj, patch, opts...)
 }
@@ -200,14 +210,104 @@ func TestRepoReconcilerUpdateStatusUsesAPIReaderAndPreservesStaleTriggerVersion(
 	if stored.Annotations[appv2.ManualSyncTriggerAnnotation] != "trigger-b" {
 		t.Fatalf("stored trigger = %q, want concurrent trigger %q", stored.Annotations[appv2.ManualSyncTriggerAnnotation], "trigger-b")
 	}
-	if _, err := reconciler.consumeOCIFullRefresh(ctx, next); !apierrors.IsConflict(err) {
-		t.Fatalf("consume stale trigger error = %v, want conflict", err)
+	if fullRefresh, err := reconciler.consumeOCIFullRefresh(ctx, next); err != nil || fullRefresh {
+		t.Fatalf("consume fresh trigger = (%t, %v), want successful manual consumption", fullRefresh, err)
 	}
 	if err := directClient.Get(ctx, types.NamespacedName{Name: repo.Name}, stored); err != nil {
 		t.Fatalf("get repository after stale trigger consumption: %v", err)
 	}
-	if stored.Annotations[appv2.ManualSyncTriggerAnnotation] != "trigger-b" {
-		t.Fatalf("stored trigger after stale consumption = %q, want concurrent trigger %q preserved", stored.Annotations[appv2.ManualSyncTriggerAnnotation], "trigger-b")
+	if _, found := stored.Annotations[appv2.ManualSyncTriggerAnnotation]; found {
+		t.Fatalf("stored trigger after consumption = %q, want consumed", stored.Annotations[appv2.ManualSyncTriggerAnnotation])
+	}
+}
+
+func TestRepoReconcilerConsumeOCIFullRefreshUsesFreshVersionAfterStatusWrite(t *testing.T) {
+	ctx := context.Background()
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "fresh-trigger-after-status", Annotations: map[string]string{
+			appv2.ManualSyncTriggerAnnotation:  "trigger-a",
+			appv2.FullRefreshTriggerAnnotation: "trigger-a",
+		}},
+		Status: appv2.RepoStatus{State: appv2.StatusCreated},
+	}
+	directReconciler, _ := newRepoReconcilerTestClient(t, repo)
+	directClient := directReconciler.Client
+	stale := &appv2.Repo{}
+	if err := directClient.Get(ctx, types.NamespacedName{Name: repo.Name}, stale); err != nil {
+		t.Fatalf("get initial repository: %v", err)
+	}
+	next := stale.DeepCopy()
+	next.Status.State = appv2.StatusSuccessful
+	reconciler := &RepoReconciler{
+		Client:    &staleRepoGetClient{Client: directClient, stale: stale},
+		apiReader: directClient,
+	}
+	if err := reconciler.UpdateStatus(ctx, next); err != nil {
+		t.Fatalf("UpdateStatus() error = %v", err)
+	}
+
+	fullRefresh, err := reconciler.consumeOCIFullRefresh(ctx, next)
+	if err != nil {
+		t.Fatalf("consumeOCIFullRefresh() error = %v, want trigger consumed after status write", err)
+	}
+	if !fullRefresh {
+		t.Fatal("consumeOCIFullRefresh() = false, want full refresh")
+	}
+	stored := &appv2.Repo{}
+	if err := directClient.Get(ctx, types.NamespacedName{Name: repo.Name}, stored); err != nil {
+		t.Fatalf("get repository after trigger consumption: %v", err)
+	}
+	if _, found := stored.Annotations[appv2.ManualSyncTriggerAnnotation]; found {
+		t.Fatal("manual trigger remains after consumption")
+	}
+	if _, found := stored.Annotations[appv2.FullRefreshTriggerAnnotation]; found {
+		t.Fatal("full refresh trigger remains after consumption")
+	}
+	if next.ResourceVersion != stored.ResourceVersion {
+		t.Fatalf("caller resource version = %q, want consumed trigger version %q", next.ResourceVersion, stored.ResourceVersion)
+	}
+}
+
+func TestRepoReconcilerConsumesTriggerAddedAfterCachedGet(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/index.yaml" {
+			t.Fatalf("unexpected repository request: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte("apiVersion: v1\nentries: {}\n"))
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "trigger-after-cached-get"},
+		Spec:       appv2.RepoSpec{Url: server.URL, SyncPeriod: ptr.To(0)},
+		Status:     appv2.RepoStatus{State: appv2.StatusSuccessful},
+	}
+	directReconciler, _ := newRepoReconcilerTestClient(t, repo)
+	directClient := directReconciler.Client
+	stale := &appv2.Repo{}
+	if err := directClient.Get(ctx, types.NamespacedName{Name: repo.Name}, stale); err != nil {
+		t.Fatalf("get initial repository: %v", err)
+	}
+	latest := stale.DeepCopy()
+	latest.Annotations = map[string]string{appv2.ManualSyncTriggerAnnotation: "trigger-a"}
+	if err := directClient.Update(ctx, latest); err != nil {
+		t.Fatalf("write trigger after cached get: %v", err)
+	}
+	reconciler := &RepoReconciler{
+		Client:    &staleRepoGetClient{Client: directClient, stale: stale},
+		apiReader: directClient,
+		recorder:  record.NewFakeRecorder(10),
+	}
+	if _, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	stored := &appv2.Repo{}
+	if err := directClient.Get(ctx, types.NamespacedName{Name: repo.Name}, stored); err != nil {
+		t.Fatalf("get repository after reconcile: %v", err)
+	}
+	if _, found := stored.Annotations[appv2.ManualSyncTriggerAnnotation]; found {
+		t.Fatal("trigger added after cached get remains unconsumed")
 	}
 }
 
@@ -247,8 +347,8 @@ func TestRepoReconcilerConsumeOCIFullRefresh(t *testing.T) {
 				t.Fatalf("consumeOCIFullRefresh() = %t, want %t", got, tt.want)
 			}
 			if tt.want {
-				if _, err = reconciler.consumeOCIFullRefresh(context.Background(), stale); !apierrors.IsConflict(err) {
-					t.Fatalf("consume stale full refresh trigger error = %v, want conflict", err)
+				if got, err := reconciler.consumeOCIFullRefresh(context.Background(), stale); err != nil || got {
+					t.Fatalf("consume consumed trigger again = (%t, %v), want (false, nil)", got, err)
 				}
 			}
 			stored := &appv2.Repo{}
@@ -1032,7 +1132,7 @@ func TestRepoReconcilerRequeuesFullRefreshConsumeConflictWithoutIncrementalSync(
 		Spec:       appv2.ApplicationVersionSpec{VersionName: "1.0.0", PullUrl: fmt.Sprintf("oci://%s/%s:1.0.0", server.Listener.Addr(), chartRepo)},
 	}
 	base, _ := newRepoReconcilerTestClient(t, repo, app, version)
-	base.Client = &conflictOnceRepoPatchClient{Client: base.Client}
+	base.Client = &concurrentTriggerRepoPatchClient{Client: base.Client}
 	request := reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}
 
 	result, err := base.Reconcile(context.Background(), request)
@@ -1049,8 +1149,8 @@ func TestRepoReconcilerRequeuesFullRefreshConsumeConflictWithoutIncrementalSync(
 	if err := base.Get(context.Background(), request.NamespacedName, stored); err != nil {
 		t.Fatalf("get repo after conflict: %v", err)
 	}
-	if stored.Annotations[appv2.FullRefreshTriggerAnnotation] == "" {
-		t.Fatal("full refresh trigger was lost after consume conflict")
+	if stored.Annotations[appv2.ManualSyncTriggerAnnotation] != "request-2" || stored.Annotations[appv2.FullRefreshTriggerAnnotation] != "request-2" {
+		t.Fatalf("concurrent trigger annotations = %#v, want request-2 markers preserved", stored.Annotations)
 	}
 
 	if _, err := base.Reconcile(context.Background(), request); err != nil {
