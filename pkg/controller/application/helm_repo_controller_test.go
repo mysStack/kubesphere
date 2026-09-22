@@ -1069,6 +1069,87 @@ func TestRepoReconcilerFailedSyncStatusSanitizesCredentials(t *testing.T) {
 	}
 }
 
+func TestRepoReconcilerUpdateSyncStatusClearsPreviousFailureOnSuccess(t *testing.T) {
+	completedAt := metav1.NewTime(time.Now().Add(-time.Minute))
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "sync-status-clears-previous-failure"},
+		Status: appv2.RepoStatus{State: appv2.StatusFailed, Sync: &appv2.RepoSyncStatus{
+			StartedAt:              metav1.NewTime(time.Now().Add(-2 * time.Minute)),
+			CompletedAt:            completedAt,
+			DurationSeconds:        60,
+			ValidChartVersionCount: 3,
+			RemoteTagCount:         4,
+			SkippedArtifactCount:   1,
+			FailedTagCount:         2,
+			RequestCount:           8,
+			CacheHitCount:          2,
+			LastError:              "previous failure",
+		}},
+	}
+	reconciler, _ := newRepoReconcilerTestClient(t, repo)
+
+	next := repo.DeepCopy()
+	beginRepoSync(next)
+	next.Status.State = appv2.StatusSyncing
+	if err := reconciler.UpdateStatus(context.Background(), next); err != nil {
+		t.Fatalf("persist sync start: %v", err)
+	}
+
+	stored := &appv2.Repo{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: repo.Name}, stored); err != nil {
+		t.Fatalf("get syncing repository: %v", err)
+	}
+	if stored.Status.Sync == nil || stored.Status.Sync.StartedAt.IsZero() || !stored.Status.Sync.CompletedAt.IsZero() || stored.Status.Sync.DurationSeconds != 0 || stored.Status.Sync.ValidChartVersionCount != 0 || stored.Status.Sync.RemoteTagCount != 0 || stored.Status.Sync.SkippedArtifactCount != 0 || stored.Status.Sync.FailedTagCount != 0 || stored.Status.Sync.RequestCount != 0 || stored.Status.Sync.CacheHitCount != 0 || stored.Status.Sync.LastError != "" {
+		t.Fatalf("syncing status = %#v, want only a new start time", stored.Status.Sync)
+	}
+
+	completeRepoSync(next, nil)
+	next.Status.State = appv2.StatusSuccessful
+	if err := reconciler.UpdateStatus(context.Background(), next); err != nil {
+		t.Fatalf("persist successful sync: %v", err)
+	}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: repo.Name}, stored); err != nil {
+		t.Fatalf("get successful repository: %v", err)
+	}
+	if stored.Status.Sync.LastError != "" || stored.Status.Sync.CompletedAt.IsZero() {
+		t.Fatalf("successful sync status = %#v, want completed status without previous error", stored.Status.Sync)
+	}
+}
+
+func TestRepoReconcilerUpdateSyncStatusClearsOCIStatsForHTTPS(t *testing.T) {
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "sync-status-clears-oci-stats"},
+		Status: appv2.RepoStatus{State: appv2.StatusSuccessful, Sync: &appv2.RepoSyncStatus{
+			StartedAt:              metav1.NewTime(time.Now().Add(-time.Minute)),
+			CompletedAt:            metav1.Now(),
+			DurationSeconds:        12,
+			ValidChartVersionCount: 5,
+			RemoteTagCount:         7,
+			SkippedArtifactCount:   2,
+			FailedTagCount:         1,
+			RequestCount:           11,
+			CacheHitCount:          4,
+		}},
+	}
+	reconciler, _ := newRepoReconcilerTestClient(t, repo)
+
+	next := repo.DeepCopy()
+	beginRepoSync(next)
+	completeRepoSync(next, nil)
+	next.Status.State = appv2.StatusSuccessful
+	if err := reconciler.UpdateStatus(context.Background(), next); err != nil {
+		t.Fatalf("persist HTTPS sync: %v", err)
+	}
+
+	stored := &appv2.Repo{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: repo.Name}, stored); err != nil {
+		t.Fatalf("get HTTPS repository: %v", err)
+	}
+	if stored.Status.Sync == nil || stored.Status.Sync.ValidChartVersionCount != 0 || stored.Status.Sync.RemoteTagCount != 0 || stored.Status.Sync.SkippedArtifactCount != 0 || stored.Status.Sync.FailedTagCount != 0 || stored.Status.Sync.RequestCount != 0 || stored.Status.Sync.CacheHitCount != 0 {
+		t.Fatalf("HTTPS sync status = %#v, want OCI metrics cleared", stored.Status.Sync)
+	}
+}
+
 func TestRepoReconcilerDirectOCIReusesExistingVersionsWithoutManifestRequests(t *testing.T) {
 	const chartRepo = "charts/demo"
 	var manifestRequests atomic.Int32

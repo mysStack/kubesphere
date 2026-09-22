@@ -295,13 +295,13 @@ type RepoSpec struct {
 type RepoSyncStatus struct {
 	StartedAt              metav1.Time `json:"startedAt,omitempty"`
 	CompletedAt            metav1.Time `json:"completedAt,omitempty"`
-	DurationSeconds        int64       `json:"durationSeconds,omitempty"`
-	ValidChartVersionCount int64       `json:"validChartVersionCount,omitempty"`
-	RemoteTagCount         int64       `json:"remoteTagCount,omitempty"`
-	SkippedArtifactCount   int64       `json:"skippedArtifactCount,omitempty"`
-	FailedTagCount         int64       `json:"failedTagCount,omitempty"`
-	RequestCount           int64       `json:"requestCount,omitempty"`
-	CacheHitCount          int64       `json:"cacheHitCount,omitempty"`
+	DurationSeconds        int64       `json:"durationSeconds"`
+	ValidChartVersionCount int64       `json:"validChartVersionCount"`
+	RemoteTagCount         int64       `json:"remoteTagCount"`
+	SkippedArtifactCount   int64       `json:"skippedArtifactCount"`
+	FailedTagCount         int64       `json:"failedTagCount"`
+	RequestCount           int64       `json:"requestCount"`
+	CacheHitCount          int64       `json:"cacheHitCount"`
 	LastError              string      `json:"lastError,omitempty"`
 }
 
