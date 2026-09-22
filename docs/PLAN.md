@@ -82,7 +82,7 @@
 
 触发器并发回归修正（2026-09-22）：
 
-- `RepoReconciler` 在状态写入后使用 API Reader 重新读取触发器，并只将该强一致读到的 annotations、resourceVersion 同步回本轮对象；避免把 `UpdateStatus` 的 metadata 回写重新引入丢失并发触发器的风险。
+- `RepoReconciler` 在触发器判定与消费时使用 API Reader 重新读取触发器，并只将该强一致读到的 annotations、resourceVersion 同步回本轮对象；避免把 `UpdateStatus` 的 metadata 回写重新引入丢失并发触发器的风险。
 - 新增回归覆盖：状态写入后的既有手动/全量触发器可在同一轮消费；缓存读取后新增的触发器不会被上游预检查遗漏；消费期间写入新触发器仍返回 Conflict 并显式 requeue，重试后保留并执行新触发器。
 
 ## 阶段三：应用商店和同步体验
