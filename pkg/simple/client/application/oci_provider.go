@@ -26,6 +26,12 @@ type OCIRepositoryProvider interface {
 	Discover(ctx context.Context, source *url.URL, cred appv2.RepoCredential, options OCIIndexOptions) ([]string, error)
 }
 
+type ociTagDiscoveryError struct{ err error }
+
+func (e *ociTagDiscoveryError) Error() string { return e.err.Error() }
+
+func (e *ociTagDiscoveryError) Unwrap() error { return e.err }
+
 type singleChartProvider struct{}
 
 func (singleChartProvider) Discover(ctx context.Context, source *url.URL, cred appv2.RepoCredential, options OCIIndexOptions) ([]string, error) {
@@ -43,7 +49,7 @@ func discoverSingleChart(ctx context.Context, source *url.URL, cred appv2.RepoCr
 	}
 	tags, err := getOCITags(ctx, registry, repository)
 	if err != nil {
-		return nil, err
+		return nil, &ociTagDiscoveryError{err: err}
 	}
 	if len(tags) == 0 {
 		return nil, nil
