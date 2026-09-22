@@ -269,6 +269,10 @@ func LoadOCIRepoIndexWithCacheAndStats(ctx context.Context, u string, cred appv2
 	u = parsedURL.String()
 	repoCharts, err := discoverOCIRepositoriesWithCounter(ctx, parsedURL, cred, options, counter)
 	if err != nil {
+		var tagDiscoveryErr *ociTagDiscoveryError
+		if errors.As(err, &tagDiscoveryErr) {
+			stats.FailedTagCount++
+		}
 		stats.RequestCount = counter.Value()
 		return idx, stats, nil, err
 	}

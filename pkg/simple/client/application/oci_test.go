@@ -973,8 +973,90 @@ func TestLoadOCIRepoIndexWithCacheReportsStats(t *testing.T) {
 	if stats.RequestCount <= 0 {
 		t.Fatalf("request count = %d, want a positive count", stats.RequestCount)
 	}
-	if failedAttempts.Load() != 2 || stats.RequestCount < 6 {
-		t.Fatalf("failed attempts = %d, request count = %d, want retry attempt included", failedAttempts.Load(), stats.RequestCount)
+	if failedAttempts.Load() != 2 {
+		t.Fatalf("failed attempts = %d, want retry attempt", failedAttempts.Load())
+	}
+	if stats.RequestCount != 7 {
+		t.Fatalf("request count = %d, want 7 (discovery, tag list, manifests, blob, and retry)", stats.RequestCount)
+	}
+}
+
+func TestLoadOCIRepoIndexWithCacheCountsDirectDiscoveryTagFailure(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/v2/charts/demo/tags/list" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	_, stats, _, err := LoadOCIRepoIndexWithCacheAndStats(context.Background(), fmt.Sprintf("oci://%s/charts/demo", server.Listener.Addr()), appv2.RepoCredential{PlainHTTP: true}, nil)
+	if err == nil {
+		t.Fatal("LoadOCIRepoIndexWithCacheAndStats() error = nil, want discovery tag-list error")
+	}
+	if stats.FailedTagCount != 1 {
+		t.Fatalf("failed tag count = %d, want 1", stats.FailedTagCount)
+	}
+	if stats.RequestCount != 1 {
+		t.Fatalf("request count = %d, want one tag-list attempt", stats.RequestCount)
+	}
+	if !reflect.DeepEqual(paths, []string{"/v2/charts/demo/tags/list"}) {
+		t.Fatalf("requests = %v, want only direct discovery tag-list request", paths)
+	}
+}
+
+func TestLoadOCIRepoIndexWithCacheDoesNotCountNonTagDiscoveryFailures(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		harborStatus  int
+		catalogStatus int
+		wantPaths     []string
+	}{
+		{
+			name:         "Harbor ping",
+			harborStatus: http.StatusInternalServerError,
+			wantPaths:    []string{"/v2/charts/demo/tags/list", "/api/v2.0/ping"},
+		},
+		{
+			name:          "catalog",
+			harborStatus:  http.StatusNotFound,
+			catalogStatus: http.StatusInternalServerError,
+			wantPaths:     []string{"/v2/charts/demo/tags/list", "/api/v2.0/ping", "/v2/_catalog"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var paths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				switch r.URL.Path {
+				case "/v2/charts/demo/tags/list":
+					w.WriteHeader(http.StatusNotFound)
+				case "/api/v2.0/ping":
+					w.WriteHeader(tt.harborStatus)
+				case "/v2/_catalog":
+					w.WriteHeader(tt.catalogStatus)
+				default:
+					t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			_, stats, _, err := LoadOCIRepoIndexWithCacheAndStats(context.Background(), fmt.Sprintf("oci://%s/charts/demo", server.Listener.Addr()), appv2.RepoCredential{PlainHTTP: true}, nil, OCIIndexOptions{RetryAttempts: 1})
+			if err == nil {
+				t.Fatal("LoadOCIRepoIndexWithCacheAndStats() error = nil, want non-tag discovery error")
+			}
+			if stats.FailedTagCount != 0 {
+				t.Fatalf("failed tag count = %d, want 0 for non-tag discovery failure", stats.FailedTagCount)
+			}
+			if !reflect.DeepEqual(paths, tt.wantPaths) {
+				t.Fatalf("requests = %v, want %v", paths, tt.wantPaths)
+			}
+		})
 	}
 }
 
