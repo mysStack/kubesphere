@@ -953,6 +953,76 @@ func TestRepoReconcilerHTTPSDoesNotUseOCILoader(t *testing.T) {
 	}
 }
 
+func TestRepoReconcilerHTTPSRecordsSyncStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/index.yaml" {
+			t.Errorf("unexpected HTTPS repository request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte("apiVersion: v1\nentries:\n  demo:\n  - apiVersion: v2\n    name: demo\n    version: 1.0.0\n    urls:\n    - https://example.test/charts/demo-1.0.0.tgz\n"))
+	}))
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "https-sync-status"},
+		Spec:       appv2.RepoSpec{Url: server.URL, SyncPeriod: ptr.To(0)},
+		Status:     appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	reconciler, _ := newRepoReconcilerTestClient(t, repo)
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	stored := &appv2.Repo{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: repo.Name}, stored); err != nil {
+		t.Fatalf("get synchronized repository: %v", err)
+	}
+	if stored.Status.Sync == nil {
+		t.Fatal("sync status is nil")
+	}
+	if stored.Status.Sync.StartedAt.IsZero() || stored.Status.Sync.CompletedAt.IsZero() {
+		t.Fatalf("sync timestamps = %#v, want start and completion timestamps", stored.Status.Sync)
+	}
+	if stored.Status.Sync.DurationSeconds < 0 {
+		t.Fatalf("sync duration = %d, want non-negative", stored.Status.Sync.DurationSeconds)
+	}
+	if stored.Status.Sync.ValidChartVersionCount != 1 {
+		t.Fatalf("valid chart versions = %d, want 1", stored.Status.Sync.ValidChartVersionCount)
+	}
+	if stored.Status.Sync.LastError != "" {
+		t.Fatalf("last error = %q, want empty after successful sync", stored.Status.Sync.LastError)
+	}
+}
+
+func TestRepoReconcilerFailedSyncStatusSanitizesCredentials(t *testing.T) {
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "failed-sync-status"},
+		Status: appv2.RepoStatus{State: appv2.StatusSyncing, Sync: &appv2.RepoSyncStatus{
+			StartedAt: metav1.Now(),
+		}},
+	}
+	reconciler, _ := newRepoReconcilerTestClient(t, repo)
+	syncErr := fmt.Errorf("load index https://user:secret@example.test/charts failed")
+	if err := reconciler.failRepoSync(context.Background(), repo, syncErr); err != syncErr {
+		t.Fatalf("failRepoSync() error = %v, want original error %v", err, syncErr)
+	}
+
+	stored := &appv2.Repo{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: repo.Name}, stored); err != nil {
+		t.Fatalf("get failed repository: %v", err)
+	}
+	if stored.Status.Sync == nil || stored.Status.Sync.CompletedAt.IsZero() {
+		t.Fatalf("failed sync status = %#v, want completion timestamp", stored.Status.Sync)
+	}
+	if strings.Contains(stored.Status.Sync.LastError, "secret") {
+		t.Fatalf("last error leaks password: %q", stored.Status.Sync.LastError)
+	}
+	if !strings.Contains(stored.Status.Sync.LastError, "https://example.test/charts") {
+		t.Fatalf("last error = %q, want sanitized URL", stored.Status.Sync.LastError)
+	}
+}
+
 func TestRepoReconcilerDirectOCIReusesExistingVersionsWithoutManifestRequests(t *testing.T) {
 	const chartRepo = "charts/demo"
 	var manifestRequests atomic.Int32
