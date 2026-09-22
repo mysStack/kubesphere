@@ -175,16 +175,30 @@ func (r *RepoReconciler) failRepoSync(ctx context.Context, helmRepo *appv2.Repo,
 
 // consumeOCIFullRefresh atomically consumes the request markers and reports whether this sync is full.
 func (r *RepoReconciler) consumeOCIFullRefresh(ctx context.Context, repo *appv2.Repo) (bool, error) {
-	_, fullRefresh := repo.Annotations[appv2.FullRefreshTriggerAnnotation]
-	if _, manualSync := repo.Annotations[appv2.ManualSyncTriggerAnnotation]; !manualSync && !fullRefresh {
-		return false, nil
+	reader := r.apiReader
+	if reader == nil {
+		reader = r.Client
 	}
-	before := repo.DeepCopy()
-	delete(repo.Annotations, appv2.ManualSyncTriggerAnnotation)
-	delete(repo.Annotations, appv2.FullRefreshTriggerAnnotation)
-	if err := r.Patch(ctx, repo, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+	fresh := &appv2.Repo{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: repo.Name, Namespace: repo.Namespace}, fresh); err != nil {
 		return false, err
 	}
+	_, fullRefresh := fresh.Annotations[appv2.FullRefreshTriggerAnnotation]
+	if _, manualSync := fresh.Annotations[appv2.ManualSyncTriggerAnnotation]; !manualSync && !fullRefresh {
+		return false, nil
+	}
+	before := fresh.DeepCopy()
+	delete(fresh.Annotations, appv2.ManualSyncTriggerAnnotation)
+	delete(fresh.Annotations, appv2.FullRefreshTriggerAnnotation)
+	if err := r.Patch(ctx, fresh, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+		return false, err
+	}
+	// Keep the caller's object aligned with the metadata used by the successful patch.
+	if err := reader.Get(ctx, types.NamespacedName{Name: repo.Name, Namespace: repo.Namespace}, fresh); err != nil {
+		return false, err
+	}
+	repo.Annotations = fresh.Annotations
+	repo.ResourceVersion = fresh.ResourceVersion
 	return fullRefresh, nil
 }
 
@@ -282,8 +296,15 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	requeueAfter := time.Duration(*helmRepo.Spec.SyncPeriod) * time.Second
 	var err error
 	var fullRefresh bool
-	_, manualSync := helmRepo.Annotations[appv2.ManualSyncTriggerAnnotation]
-	_, fullRefreshRequested := helmRepo.Annotations[appv2.FullRefreshTriggerAnnotation]
+	triggerRepo := helmRepo
+	if r.apiReader != nil {
+		triggerRepo = &appv2.Repo{}
+		if err := r.apiReader.Get(ctx, request.NamespacedName, triggerRepo); err != nil {
+			return reconcile.Result{}, err
+		}
+	}
+	_, manualSync := triggerRepo.Annotations[appv2.ManualSyncTriggerAnnotation]
+	_, fullRefreshRequested := triggerRepo.Annotations[appv2.FullRefreshTriggerAnnotation]
 	fullRefreshRequested = fullRefreshRequested && registry.IsOCI(helmRepo.Spec.Url)
 	if manualSync || fullRefreshRequested {
 		fullRefresh, err = r.consumeOCIFullRefresh(ctx, helmRepo)
