@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/opencontainers/go-digest"
@@ -24,6 +25,34 @@ import (
 
 type RepositoryOptions remote.Repository
 type RegistryOption func(*Registry)
+
+// RequestCounter tracks HTTP request attempts for one registry operation.
+type RequestCounter struct {
+	requests atomic.Int64
+}
+
+func (c *RequestCounter) Add() {
+	if c != nil {
+		c.requests.Add(1)
+	}
+}
+
+func (c *RequestCounter) Value() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.requests.Load()
+}
+
+type countingRoundTripper struct {
+	base    http.RoundTripper
+	counter *RequestCounter
+}
+
+func (t countingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.counter.Add()
+	return t.base.RoundTrip(req)
+}
 
 const defaultRetryAttempts = 3
 
@@ -75,6 +104,7 @@ type Registry struct {
 	retryAttempts         int
 	insecureSkipVerifyTLS bool
 	tlsClientConfig       *tls.Config
+	requestCounter        *RequestCounter
 }
 
 func NewRegistry(name string, options ...RegistryOption) (*Registry, error) {
@@ -89,13 +119,18 @@ func NewRegistry(name string, options ...RegistryOption) (*Registry, error) {
 	for _, option := range options {
 		option(reg)
 	}
+	transport := &http.Transport{TLSClientConfig: reg.tlsConfig(), Proxy: http.ProxyFromEnvironment}
+	var roundTripper http.RoundTripper = transport
+	if reg.requestCounter != nil {
+		roundTripper = countingRoundTripper{base: transport, counter: reg.requestCounter}
+	}
 
 	headers := http.Header{}
 	headers.Set("User-Agent", "kubesphere.io")
 	reg.Client = &auth.Client{
 		Client: &http.Client{
 			Timeout:   reg.timeout,
-			Transport: &http.Transport{TLSClientConfig: reg.tlsConfig(), Proxy: http.ProxyFromEnvironment},
+			Transport: roundTripper,
 		},
 		Header: headers,
 		Credential: func(_ context.Context, _ string) (auth.Credential, error) {
@@ -111,6 +146,13 @@ func NewRegistry(name string, options ...RegistryOption) (*Registry, error) {
 	}
 
 	return reg, nil
+}
+
+// WithRequestCounter counts every underlying HTTP attempt, including retries.
+func WithRequestCounter(counter *RequestCounter) RegistryOption {
+	return func(reg *Registry) {
+		reg.requestCounter = counter
+	}
 }
 
 func (r *Registry) tlsConfig() *tls.Config {

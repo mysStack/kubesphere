@@ -362,6 +362,52 @@ func TestRepoReconcilerPreservesApplicationsWhenOCIIndexIsPartial(t *testing.T) 
 	}
 }
 
+func TestRepoReconcilerRecordsOCIStatsForPartialIndex(t *testing.T) {
+	server := newOCIControllerServer(t, []ociControllerChartFixture{
+		{repository: "charts/valid", tag: "1.0.0", digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", config: `{"apiVersion":"v2","name":"valid","version":"1.0.0"}`},
+		{repository: "charts/broken", tag: "1.0.0", digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", config: `{"name":`},
+	})
+	defer server.Close()
+
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "partial-oci-stats", UID: types.UID("repo-uid")},
+		Spec:       appv2.RepoSpec{Url: fmt.Sprintf("oci://%s", server.Listener.Addr()), Credential: appv2.RepoCredential{PlainHTTP: true}, SyncPeriod: ptr.To(0)},
+		Status:     appv2.RepoStatus{State: appv2.StatusManualTrigger},
+	}
+	validAppName := repo.Name + "-" + appclient.GenerateShortNameMD5Hash("valid")
+	validApp := &appv2.Application{ObjectMeta: metav1.ObjectMeta{
+		Name:        validAppName,
+		Labels:      map[string]string{appv2.RepoIDLabelKey: repo.Name},
+		Annotations: map[string]string{appv2.AppOriginalNameLabelKey: "valid"},
+	}}
+	cachedVersion := &appv2.ApplicationVersion{ObjectMeta: metav1.ObjectMeta{
+		Name:   validAppName + "-1.0.0",
+		Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name, appv2.AppIDLabelKey: validAppName},
+	}, Spec: appv2.ApplicationVersionSpec{VersionName: "1.0.0", PullUrl: fmt.Sprintf("oci://%s/charts/valid:1.0.0", server.Listener.Addr())}}
+	staleVersion := &appv2.ApplicationVersion{ObjectMeta: metav1.ObjectMeta{
+		Name:   validAppName + "-0.9.0",
+		Labels: map[string]string{appv2.RepoIDLabelKey: repo.Name, appv2.AppIDLabelKey: validAppName},
+	}, Spec: appv2.ApplicationVersionSpec{VersionName: "0.9.0", PullUrl: fmt.Sprintf("oci://%s/charts/valid:0.9.0", server.Listener.Addr())}}
+
+	reconciler, _ := newRepoReconcilerTestClient(t, repo, validApp, cachedVersion, staleVersion)
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	stored := &appv2.Repo{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: repo.Name}, stored); err != nil {
+		t.Fatalf("get repository: %v", err)
+	}
+	if stored.Status.Sync == nil {
+		t.Fatal("sync status is nil")
+	}
+	if stored.Status.Sync.RemoteTagCount != 2 || stored.Status.Sync.ValidChartVersionCount != 1 || stored.Status.Sync.FailedTagCount != 1 || stored.Status.Sync.CacheHitCount != 1 || stored.Status.Sync.RequestCount <= 0 {
+		t.Fatalf("sync stats = %#v, want partial OCI metrics", stored.Status.Sync)
+	}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Name: staleVersion.Name}, &appv2.ApplicationVersion{}); err != nil {
+		t.Fatalf("partial index deleted stale version: %v", err)
+	}
+}
+
 func TestRepoReconcilerPreservesHistoricalCatalogChartThatBecomesNonHelm(t *testing.T) {
 	const (
 		goodRepository       = "charts/good"

@@ -921,6 +921,63 @@ func TestLoadOCIRepoIndexWithCacheSkipsCachedTagMetadataRequests(t *testing.T) {
 	}
 }
 
+func TestLoadOCIRepoIndexWithCacheReportsStats(t *testing.T) {
+	const (
+		repository  = "charts/demo"
+		cachedTag   = "1.0.0"
+		validTag    = "2.0.0"
+		artifactTag = "3.0.0"
+		failedTag   = "4.0.0"
+	)
+	var failedAttempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/" + repository + "/tags/list":
+			_ = json.NewEncoder(w).Encode(map[string][]string{"tags": {cachedTag, validTag, artifactTag, failedTag}})
+		case "/v2/" + repository + "/manifests/" + validTag:
+			_ = json.NewEncoder(w).Encode(helmOCIManifest("sha256:valid-config"))
+		case "/v2/" + repository + "/blobs/sha256:valid-config":
+			_, _ = w.Write([]byte(`{"apiVersion":"v2","name":"demo","version":"2.0.0"}`))
+		case "/v2/" + repository + "/manifests/" + artifactTag:
+			_ = json.NewEncoder(w).Encode(ocispec.Manifest{Config: ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}})
+		case "/v2/" + repository + "/manifests/" + failedTag:
+			if failedAttempts.Add(1) == 1 {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			t.Errorf("unexpected OCI request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	host := server.Listener.Addr().String()
+	cache := OCIChartVersionCache{
+		ociCacheKey(host, repository, cachedTag): {
+			Metadata: &chart.Metadata{Name: "demo", Version: cachedTag},
+			URLs:     []string{fmt.Sprintf("oci://%s/%s:%s", host, repository, cachedTag)},
+		},
+	}
+	index, stats, warnings, err := LoadOCIRepoIndexWithCacheAndStats(context.Background(), fmt.Sprintf("oci://%s/%s", host, repository), appv2.RepoCredential{PlainHTTP: true}, cache)
+	if err != nil {
+		t.Fatalf("LoadOCIRepoIndexWithCacheAndStats() error = %v", err)
+	}
+	if len(index.Entries["demo"]) != 2 || len(warnings) != 2 {
+		t.Fatalf("index entries = %v, warnings = %v", index.Entries, warnings)
+	}
+	if stats.RemoteTagCount != 4 || stats.ValidChartVersionCount != 2 || stats.SkippedArtifactCount != 1 || stats.FailedTagCount != 1 || stats.CacheHitCount != 1 {
+		t.Fatalf("stats = %#v, want 4 remote tags, 2 valid charts, 1 skipped artifact, 1 failed tag, and 1 cache hit", stats)
+	}
+	if stats.RequestCount <= 0 {
+		t.Fatalf("request count = %d, want a positive count", stats.RequestCount)
+	}
+	if failedAttempts.Load() != 2 || stats.RequestCount < 6 {
+		t.Fatalf("failed attempts = %d, request count = %d, want retry attempt included", failedAttempts.Load(), stats.RequestCount)
+	}
+}
+
 func TestLoadOCIRepoIndexWithCacheDirectRepoReusesCachedVersionWithoutManifestRequests(t *testing.T) {
 	const repository = "charts/demo"
 	const tag = "1.0.0"
