@@ -64,10 +64,16 @@
 - [x] 辅助 Artifact 在 tag 过滤阶段跳过，manifest 校验失败只记录单版本警告，不阻塞其他版本。
 - [x] 为 429、5xx、超时实现有限次数重试和退避；认证错误、TLS 错误、404 不重复重试。
 - [x] 将同步并发、tag 分页大小、请求超时、缓存 TTL 和重试次数配置化，并设置安全默认值。
-- [ ] 增加仓库健康信息：远端版本数、有效 Chart 数、跳过数、失败数、请求数、最近同步耗时。
+- [~] 增加仓库健康信息：远端版本数、有效 Chart 数、跳过数、失败数、请求数、最近同步耗时（代码与本地回归已完成，测试环境验证待执行）。
 - [x] 增加离线 Registry Mock 测试：77 个版本、metadata Artifact、429、慢响应、重复 digest、部分失败。
 
 当前默认值：metadata 请求并发上限为 4、tag 分页大小为 100、单次请求超时 30 秒；429/5xx/超时最多尝试 3 次，退避为 200ms、500ms，并优先遵循 `Retry-After`。`applicationRepository.oci.cacheTTL` 默认为 `0s`，不会额外触发全量请求；设置为正值后，过期的 Repo 在下一次正常或手动同步时做一次全量 metadata 校验，只有无 warning 的完整结果才更新 `application.kubesphere.io/oci-cache-validated-at`。默认同步假定 OCI tag 不可变，已缓存 tag 不会重新拉取 manifest；需要重新校验旧 tag 时，也可使用 OCI 仓库的“全量校验”动作一次性绕过缓存，下一次默认同步恢复缓存。
+
+仓库健康信息实现记录（2026-09-22）：
+
+- 后端在 `Repo.status.sync` 记录通用同步生命周期，并为 OCI 记录远端 tag、有效 Chart、跳过 Artifact、失败 tag、请求次数和缓存命中；请求计数按单次同步隔离，覆盖发现、tag、manifest、blob 与重试请求。
+- Console 仓库列表保留原状态点和文案，追加同步开始时间或耗时/有效版本摘要；旧 Repo 无 `status.sync` 时保持兼容，手动同步排队态不显示旧摘要。
+- 本地后端 API/OCI/controller/KAPI 测试、Console 5 项摘要测试、TypeScript、Prettier、ESLint 新增文件检查均通过；测试环境构建、部署和在线验证待下一步执行。
 
 验收标准：重复同步主要命中缓存；同一 Registry 多仓库不会无限并发；429 不导致整个 Repo 进入不可恢复状态；同步结果可解释、可重试、可观测。
 
