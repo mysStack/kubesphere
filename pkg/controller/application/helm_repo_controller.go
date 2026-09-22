@@ -7,7 +7,6 @@ package application
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -105,13 +104,14 @@ func (r *RepoReconciler) SetupWithManager(mgr *kscontroller.Manager) (err error)
 
 func (r *RepoReconciler) UpdateStatus(ctx context.Context, helmRepo *appv2.Repo) error {
 	newRepo := &appv2.Repo{}
-	newRepo.Name = helmRepo.Name
+	if err := r.Get(ctx, types.NamespacedName{Name: helmRepo.Name}, newRepo); err != nil {
+		return err
+	}
 	newRepo.Status = helmRepo.Status
 	newRepo.Status.LastUpdateTime = metav1.Now()
 	logger := r.logger.WithValues("repo", helmRepo.Name)
 
-	patch, _ := json.Marshal(newRepo)
-	err := r.Status().Patch(ctx, newRepo, client.RawPatch(client.Merge.Type(), patch))
+	err := r.Status().Update(ctx, newRepo)
 	if err != nil {
 		logger.Error(err, "update status failed")
 		return err
