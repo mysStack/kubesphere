@@ -106,6 +106,11 @@
 
 验收标准：用户点击立即同步后页面不超时；状态最终可收敛到成功或失败；新版本能刷新到应用部署选择列表；错误不再只显示“同步中”。
 
+阶段三第一小步（2026-09-23）：
+
+- Console 将后端 `manualTrigger`（已排队）按“同步中”展示，避免出现未翻译状态或旧成功摘要；同步中和排队中的仓库均禁止重复触发。
+- 用户发起增量同步或 OCI 全量校验后，Console 只轮询被触发仓库所在的列表；收到 `successful` 或 `failed` 等终态即停止轮询，不增加后端任务系统。
+
 ## 阶段四：Kubernetes Gateway API 基础接入
 
 目标：引入标准 Kubernetes Gateway API，与现有 Ingress 和旧版 KubeSphere Gateway 并存。
