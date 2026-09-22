@@ -25,9 +25,11 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	appv2 "kubesphere.io/api/application/v2"
+	kscontroller "kubesphere.io/kubesphere/pkg/controller"
 	appclient "kubesphere.io/kubesphere/pkg/simple/client/application"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -48,6 +50,33 @@ func (c *conflictOnceRepoPatchClient) Patch(ctx context.Context, obj ctrlclient.
 		return apierrors.NewConflict(schema.GroupResource{Group: appv2.GroupName, Resource: "repos"}, obj.GetName(), fmt.Errorf("injected conflict"))
 	}
 	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
+type staleRepoGetClient struct {
+	ctrlclient.Client
+	stale *appv2.Repo
+}
+
+func (c *staleRepoGetClient) Get(ctx context.Context, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+	if repo, ok := obj.(*appv2.Repo); ok && key.Name == c.stale.Name && key.Namespace == c.stale.Namespace {
+		c.stale.DeepCopyInto(repo)
+		return nil
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+type repoReconcilerManager struct {
+	manager.Manager
+	client    ctrlclient.Client
+	apiReader ctrlclient.Reader
+}
+
+func (m *repoReconcilerManager) GetClient() ctrlclient.Client {
+	return m.client
+}
+
+func (m *repoReconcilerManager) GetAPIReader() ctrlclient.Reader {
+	return m.apiReader
 }
 
 func newOCIControllerServer(t *testing.T, fixtures []ociControllerChartFixture) *httptest.Server {
@@ -106,7 +135,62 @@ func newRepoReconcilerTestClient(t *testing.T, objects ...runtime.Object) (*Repo
 		WithStatusSubresource(&appv2.Repo{}, &appv2.Application{}, &appv2.ApplicationVersion{}).
 		WithRuntimeObjects(objects...).Build()
 	recorder := record.NewFakeRecorder(10)
-	return &RepoReconciler{Client: client, recorder: recorder}, recorder
+	return &RepoReconciler{Client: client, apiReader: client, recorder: recorder}, recorder
+}
+
+func TestRepoReconcilerSetupWithManagerInjectsAPIReader(t *testing.T) {
+	directReconciler, _ := newRepoReconcilerTestClient(t)
+	cachedClient := &staleRepoGetClient{Client: directReconciler.Client, stale: &appv2.Repo{}}
+	reconciler := &RepoReconciler{}
+	reconciler.configureClientReaders(&kscontroller.Manager{Manager: &repoReconcilerManager{
+		client:    cachedClient,
+		apiReader: directReconciler.Client,
+	}})
+
+	if reconciler.Client != cachedClient {
+		t.Fatal("SetupWithManager did not retain the manager client")
+	}
+	if reconciler.apiReader != directReconciler.Client {
+		t.Fatal("SetupWithManager did not inject the API reader")
+	}
+}
+
+func TestRepoReconcilerUpdateStatusUsesAPIReaderAndRefreshesResourceVersion(t *testing.T) {
+	ctx := context.Background()
+	repo := &appv2.Repo{ObjectMeta: metav1.ObjectMeta{Name: "status-api-reader"}, Status: appv2.RepoStatus{State: appv2.StatusCreated}}
+	directReconciler, _ := newRepoReconcilerTestClient(t, repo)
+	directClient := directReconciler.Client
+	stale := &appv2.Repo{}
+	if err := directClient.Get(ctx, types.NamespacedName{Name: repo.Name}, stale); err != nil {
+		t.Fatalf("get initial repository: %v", err)
+	}
+
+	latest := stale.DeepCopy()
+	latest.Status.State = appv2.StatusSyncing
+	if err := directClient.Status().Update(ctx, latest); err != nil {
+		t.Fatalf("write intervening status: %v", err)
+	}
+
+	next := stale.DeepCopy()
+	next.Status.State = appv2.StatusSuccessful
+	reconciler := &RepoReconciler{
+		Client:    &staleRepoGetClient{Client: directClient, stale: stale},
+		apiReader: directClient,
+	}
+	if err := reconciler.UpdateStatus(ctx, next); err != nil {
+		t.Fatalf("UpdateStatus() error = %v, want direct read to avoid stale resource version conflict", err)
+	}
+
+	stored := &appv2.Repo{}
+	if err := directClient.Get(ctx, types.NamespacedName{Name: repo.Name}, stored); err != nil {
+		t.Fatalf("get updated repository: %v", err)
+	}
+	if stored.Status.State != appv2.StatusSuccessful {
+		t.Fatalf("stored status = %q, want %q", stored.Status.State, appv2.StatusSuccessful)
+	}
+	if next.ResourceVersion != stored.ResourceVersion {
+		t.Fatalf("caller resource version = %q, want %q after status update", next.ResourceVersion, stored.ResourceVersion)
+	}
 }
 
 func TestRepoReconcilerConsumeOCIFullRefresh(t *testing.T) {

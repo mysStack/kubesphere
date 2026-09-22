@@ -48,6 +48,7 @@ var syncErrorURLPattern = regexp.MustCompile(`(?:https?|oci)://[^[:space:]]+`)
 type RepoReconciler struct {
 	recorder record.EventRecorder
 	client.Client
+	apiReader  client.Reader
 	ossStore   s3.Interface
 	cmStore    s3.Interface
 	logger     logr.Logger
@@ -79,7 +80,7 @@ func (r *RepoReconciler) mapper(ctx context.Context, o client.Object) (requests 
 }
 
 func (r *RepoReconciler) SetupWithManager(mgr *kscontroller.Manager) (err error) {
-	r.Client = mgr.GetClient()
+	r.configureClientReaders(mgr)
 	r.recorder = mgr.GetEventRecorderFor(helmRepoController)
 	r.logger = ctrl.Log.WithName("controllers").WithName(helmRepoController)
 	if mgr.Options.ApplicationRepositoryOptions != nil && mgr.Options.ApplicationRepositoryOptions.OCI != nil {
@@ -102,9 +103,21 @@ func (r *RepoReconciler) SetupWithManager(mgr *kscontroller.Manager) (err error)
 		Complete(r)
 }
 
+func (r *RepoReconciler) configureClientReaders(mgr interface {
+	GetClient() client.Client
+	GetAPIReader() client.Reader
+}) {
+	r.Client = mgr.GetClient()
+	r.apiReader = mgr.GetAPIReader()
+}
+
 func (r *RepoReconciler) UpdateStatus(ctx context.Context, helmRepo *appv2.Repo) error {
 	newRepo := &appv2.Repo{}
-	if err := r.Get(ctx, types.NamespacedName{Name: helmRepo.Name}, newRepo); err != nil {
+	reader := r.apiReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, types.NamespacedName{Name: helmRepo.Name}, newRepo); err != nil {
 		return err
 	}
 	newRepo.Status = helmRepo.Status
@@ -116,6 +129,7 @@ func (r *RepoReconciler) UpdateStatus(ctx context.Context, helmRepo *appv2.Repo)
 		logger.Error(err, "update status failed")
 		return err
 	}
+	helmRepo.ResourceVersion = newRepo.ResourceVersion
 	logger.V(4).Info("update repo status", "status", helmRepo.Status.State)
 	return nil
 }
