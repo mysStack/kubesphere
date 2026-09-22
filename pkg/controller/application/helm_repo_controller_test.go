@@ -155,9 +155,15 @@ func TestRepoReconcilerSetupWithManagerInjectsAPIReader(t *testing.T) {
 	}
 }
 
-func TestRepoReconcilerUpdateStatusUsesAPIReaderAndRefreshesResourceVersion(t *testing.T) {
+func TestRepoReconcilerUpdateStatusUsesAPIReaderAndPreservesStaleTriggerVersion(t *testing.T) {
 	ctx := context.Background()
-	repo := &appv2.Repo{ObjectMeta: metav1.ObjectMeta{Name: "status-api-reader"}, Status: appv2.RepoStatus{State: appv2.StatusCreated}}
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "status-api-reader",
+			Annotations: map[string]string{appv2.ManualSyncTriggerAnnotation: "trigger-a"},
+		},
+		Status: appv2.RepoStatus{State: appv2.StatusCreated},
+	}
 	directReconciler, _ := newRepoReconcilerTestClient(t, repo)
 	directClient := directReconciler.Client
 	stale := &appv2.Repo{}
@@ -166,9 +172,9 @@ func TestRepoReconcilerUpdateStatusUsesAPIReaderAndRefreshesResourceVersion(t *t
 	}
 
 	latest := stale.DeepCopy()
-	latest.Status.State = appv2.StatusSyncing
-	if err := directClient.Status().Update(ctx, latest); err != nil {
-		t.Fatalf("write intervening status: %v", err)
+	latest.Annotations[appv2.ManualSyncTriggerAnnotation] = "trigger-b"
+	if err := directClient.Update(ctx, latest); err != nil {
+		t.Fatalf("write concurrent trigger: %v", err)
 	}
 
 	next := stale.DeepCopy()
@@ -188,8 +194,20 @@ func TestRepoReconcilerUpdateStatusUsesAPIReaderAndRefreshesResourceVersion(t *t
 	if stored.Status.State != appv2.StatusSuccessful {
 		t.Fatalf("stored status = %q, want %q", stored.Status.State, appv2.StatusSuccessful)
 	}
-	if next.ResourceVersion != stored.ResourceVersion {
-		t.Fatalf("caller resource version = %q, want %q after status update", next.ResourceVersion, stored.ResourceVersion)
+	if next.ResourceVersion != stale.ResourceVersion {
+		t.Fatalf("caller resource version = %q, want stale trigger version %q", next.ResourceVersion, stale.ResourceVersion)
+	}
+	if stored.Annotations[appv2.ManualSyncTriggerAnnotation] != "trigger-b" {
+		t.Fatalf("stored trigger = %q, want concurrent trigger %q", stored.Annotations[appv2.ManualSyncTriggerAnnotation], "trigger-b")
+	}
+	if _, err := reconciler.consumeOCIFullRefresh(ctx, next); !apierrors.IsConflict(err) {
+		t.Fatalf("consume stale trigger error = %v, want conflict", err)
+	}
+	if err := directClient.Get(ctx, types.NamespacedName{Name: repo.Name}, stored); err != nil {
+		t.Fatalf("get repository after stale trigger consumption: %v", err)
+	}
+	if stored.Annotations[appv2.ManualSyncTriggerAnnotation] != "trigger-b" {
+		t.Fatalf("stored trigger after stale consumption = %q, want concurrent trigger %q preserved", stored.Annotations[appv2.ManualSyncTriggerAnnotation], "trigger-b")
 	}
 }
 

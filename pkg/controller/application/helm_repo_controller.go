@@ -129,7 +129,6 @@ func (r *RepoReconciler) UpdateStatus(ctx context.Context, helmRepo *appv2.Repo)
 		logger.Error(err, "update status failed")
 		return err
 	}
-	helmRepo.ResourceVersion = newRepo.ResourceVersion
 	logger.V(4).Info("update repo status", "status", helmRepo.Status.State)
 	return nil
 }
