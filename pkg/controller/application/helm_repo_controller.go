@@ -139,6 +139,18 @@ func completeRepoSync(helmRepo *appv2.Repo, syncErr error) {
 	helmRepo.Status.Sync.LastError = syncErrorURLPattern.ReplaceAllStringFunc(syncErr.Error(), application.SanitizeOCIURL)
 }
 
+func setOCIIndexStats(helmRepo *appv2.Repo, stats application.OCIIndexStats) {
+	if helmRepo.Status.Sync == nil {
+		beginRepoSync(helmRepo)
+	}
+	helmRepo.Status.Sync.RemoteTagCount = stats.RemoteTagCount
+	helmRepo.Status.Sync.ValidChartVersionCount = stats.ValidChartVersionCount
+	helmRepo.Status.Sync.SkippedArtifactCount = stats.SkippedArtifactCount
+	helmRepo.Status.Sync.FailedTagCount = stats.FailedTagCount
+	helmRepo.Status.Sync.RequestCount = stats.RequestCount
+	helmRepo.Status.Sync.CacheHitCount = stats.CacheHitCount
+}
+
 func (r *RepoReconciler) failRepoSync(ctx context.Context, helmRepo *appv2.Repo, syncErr error) error {
 	helmRepo.Status.State = appv2.StatusFailed
 	completeRepoSync(helmRepo, syncErr)
@@ -309,6 +321,7 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 
 	var index helmrepo.IndexFile
 	var indexWarnings []error
+	var ociStats application.OCIIndexStats
 	repoURL := helmRepo.Spec.Url
 	if registry.IsOCI(helmRepo.Spec.Url) {
 		repoURL = application.SanitizeOCIURL(repoURL)
@@ -321,7 +334,8 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		if fullRefresh {
 			cached = cached.ForFullRefresh()
 		}
-		index, indexWarnings, err = application.LoadOCIRepoIndexWithCache(ctx, repoURL, credential, cached, r.OCIOptions)
+		index, ociStats, indexWarnings, err = application.LoadOCIRepoIndexWithCacheAndStats(ctx, repoURL, credential, cached, r.OCIOptions)
+		setOCIIndexStats(helmRepo, ociStats)
 		if err == nil && len(index.Entries) == 0 {
 			err = fmt.Errorf("no valid OCI Helm charts found at %s", repoURL)
 		}

@@ -106,6 +106,16 @@ func (w *OCIIndexWarning) Error() string {
 
 func (w *OCIIndexWarning) Unwrap() error { return w.Err }
 
+// OCIIndexStats contains metrics collected during one OCI index load.
+type OCIIndexStats struct {
+	RemoteTagCount         int64
+	ValidChartVersionCount int64
+	SkippedArtifactCount   int64
+	FailedTagCount         int64
+	RequestCount           int64
+	CacheHitCount          int64
+}
+
 func HelmPullFromOci(u string, cred appv2.RepoCredential) ([]byte, error) {
 	safeURL := SanitizeOCIURL(u)
 	if !registry.IsOCI(u) {
@@ -243,26 +253,35 @@ func chartMaintainers(maintainers []appv2.Maintainer) []*chart.Maintainer {
 
 // LoadOCIRepoIndexWithCache loads OCI metadata, reusing complete cached versions by tag.
 func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCredential, cached OCIChartVersionCache, configured ...OCIIndexOptions) (idx helmrepo.IndexFile, warnings []error, err error) {
+	idx, _, warnings, err = LoadOCIRepoIndexWithCacheAndStats(ctx, u, cred, cached, configured...)
+	return idx, warnings, err
+}
+
+// LoadOCIRepoIndexWithCacheAndStats loads OCI metadata and returns per-call metrics.
+func LoadOCIRepoIndexWithCacheAndStats(ctx context.Context, u string, cred appv2.RepoCredential, cached OCIChartVersionCache, configured ...OCIIndexOptions) (idx helmrepo.IndexFile, stats OCIIndexStats, warnings []error, err error) {
+	counter := &oci.RequestCounter{}
 	options := DefaultOCIIndexOptions()
 	if len(configured) > 0 {
 		options = configured[0].normalized()
 	}
 	if !registry.IsOCI(u) {
-		return idx, nil, fmt.Errorf("invalid oci URL format: %s", SanitizeOCIURL(u))
+		return idx, stats, nil, fmt.Errorf("invalid oci URL format: %s", SanitizeOCIURL(u))
 	}
 	parsedURL, err := url.Parse(u)
 	if err != nil {
-		return idx, nil, errors.New("invalid OCI URL")
+		return idx, stats, nil, errors.New("invalid OCI URL")
 	}
 	parsedURL.User = nil
 	u = parsedURL.String()
-	repoCharts, err := DiscoverOCIRepositoriesWithOptions(ctx, parsedURL, cred, options)
+	repoCharts, err := discoverOCIRepositoriesWithCounter(ctx, parsedURL, cred, options, counter)
 	if err != nil {
-		return idx, nil, err
+		stats.RequestCount = counter.Value()
+		return idx, stats, nil, err
 	}
-	ociRegistry, err := newOCIRegistry(u, cred, options)
+	ociRegistry, err := newOCIRegistryWithCounter(u, cred, counter, options)
 	if err != nil {
-		return idx, nil, err
+		stats.RequestCount = counter.Value()
+		return idx, stats, nil, err
 	}
 
 	index := helmrepo.NewIndexFile()
@@ -270,11 +289,24 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 		tags, err := getOCITags(ctx, ociRegistry, repoChart)
 		if err != nil {
 			warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Err: fmt.Errorf("load OCI tags: %w", err)})
+			stats.FailedTagCount++
 			continue
 		}
+		stats.RemoteTagCount += int64(len(tags))
+		semanticTags := semanticOCITags(tags)
+		for _, tag := range semanticTags {
+			if cached[ociCacheKey(parsedURL.Host, repoChart, tag)] != nil {
+				stats.CacheHitCount++
+			}
+		}
 		directRepository := len(repoCharts) == 1 && repoChart == ociRepositoryPath(parsedURL)
-		chartVersions, inspectionWarnings := loadOCIChartVersions(ctx, ociRegistry, parsedURL.Host, repoChart, semanticOCITags(tags), cached, options.MetadataConcurrency)
+		chartVersions, inspectionWarnings := loadOCIChartVersions(ctx, ociRegistry, parsedURL.Host, repoChart, semanticTags, cached, options.MetadataConcurrency)
 		for _, warning := range inspectionWarnings {
+			if errors.Is(warning, ErrNotHelmOCIArtifact) {
+				stats.SkippedArtifactCount++
+			} else {
+				stats.FailedTagCount++
+			}
 			var indexWarning *OCIIndexWarning
 			historicalChart := errors.As(warning, &indexWarning) && hasOCIChartHistory(cached, parsedURL.Host, repoChart, indexWarning.Tag)
 			if directRepository || historicalChart || !errors.Is(warning, ErrNotHelmOCIArtifact) {
@@ -284,11 +316,15 @@ func LoadOCIRepoIndexWithCache(ctx context.Context, u string, cred appv2.RepoCre
 		for _, chartVersion := range chartVersions {
 			if err := index.MustAdd(chartVersion.Metadata, "", chartVersion.URLs[0], chartVersion.Digest); err != nil {
 				warnings = append(warnings, &OCIIndexWarning{Repository: repoChart, Tag: chartVersion.Version, Digest: chartVersion.Digest, Err: err})
+				stats.FailedTagCount++
+			} else {
+				stats.ValidChartVersionCount++
 			}
 		}
 	}
 	index.SortEntries()
-	return *index, warnings, nil
+	stats.RequestCount = counter.Value()
+	return *index, stats, warnings, nil
 }
 
 func hasOCIChartHistory(cached OCIChartVersionCache, host, repository, tag string) bool {
@@ -531,6 +567,10 @@ func newOCIRegistryClient(u string, cred appv2.RepoCredential) (*registry.Client
 }
 
 func newOCIRegistry(u string, cred appv2.RepoCredential, configured ...OCIIndexOptions) (*oci.Registry, error) {
+	return newOCIRegistryWithCounter(u, cred, nil, configured...)
+}
+
+func newOCIRegistryWithCounter(u string, cred appv2.RepoCredential, counter *oci.RequestCounter, configured ...OCIIndexOptions) (*oci.Registry, error) {
 	options := DefaultOCIIndexOptions()
 	if len(configured) > 0 {
 		options = configured[0].normalized()
@@ -552,6 +592,7 @@ func newOCIRegistry(u string, cred appv2.RepoCredential, configured ...OCIIndexO
 		oci.WithTagListPageSize(options.TagListPageSize),
 		oci.WithBasicAuth(cred.Username, cred.Password),
 		oci.WithTLSClientConfig(tlsConfig),
+		oci.WithRequestCounter(counter),
 	}
 	if cred.PlainHTTP {
 		registryOptions = append(registryOptions, oci.WithPlainHTTP())
