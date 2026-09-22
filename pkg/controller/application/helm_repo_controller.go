@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -42,6 +43,8 @@ const helmRepoController = "helmrepo-controller"
 
 var _ reconcile.Reconciler = &RepoReconciler{}
 var _ kscontroller.Controller = &RepoReconciler{}
+
+var syncErrorURLPattern = regexp.MustCompile(`(?:https?|oci)://[^[:space:]]+`)
 
 type RepoReconciler struct {
 	recorder record.EventRecorder
@@ -103,7 +106,7 @@ func (r *RepoReconciler) SetupWithManager(mgr *kscontroller.Manager) (err error)
 func (r *RepoReconciler) UpdateStatus(ctx context.Context, helmRepo *appv2.Repo) error {
 	newRepo := &appv2.Repo{}
 	newRepo.Name = helmRepo.Name
-	newRepo.Status.State = helmRepo.Status.State
+	newRepo.Status = helmRepo.Status
 	newRepo.Status.LastUpdateTime = metav1.Now()
 	logger := r.logger.WithValues("repo", helmRepo.Name)
 
@@ -117,8 +120,27 @@ func (r *RepoReconciler) UpdateStatus(ctx context.Context, helmRepo *appv2.Repo)
 	return nil
 }
 
+func beginRepoSync(helmRepo *appv2.Repo) {
+	helmRepo.Status.Sync = &appv2.RepoSyncStatus{StartedAt: metav1.Now()}
+}
+
+func completeRepoSync(helmRepo *appv2.Repo, syncErr error) {
+	if helmRepo.Status.Sync == nil {
+		beginRepoSync(helmRepo)
+	}
+	completedAt := metav1.Now()
+	helmRepo.Status.Sync.CompletedAt = completedAt
+	helmRepo.Status.Sync.DurationSeconds = int64(completedAt.Sub(helmRepo.Status.Sync.StartedAt.Time).Seconds())
+	if syncErr == nil {
+		helmRepo.Status.Sync.LastError = ""
+		return
+	}
+	helmRepo.Status.Sync.LastError = syncErrorURLPattern.ReplaceAllStringFunc(syncErr.Error(), application.SanitizeOCIURL)
+}
+
 func (r *RepoReconciler) failRepoSync(ctx context.Context, helmRepo *appv2.Repo, syncErr error) error {
 	helmRepo.Status.State = appv2.StatusFailed
+	completeRepoSync(helmRepo, syncErr)
 	if err := r.UpdateStatus(ctx, helmRepo); err != nil {
 		return fmt.Errorf("%w; update failed repo status: %v", syncErr, err)
 	}
@@ -258,6 +280,7 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		fullRefresh = true
 	}
 
+	beginRepoSync(helmRepo)
 	helmRepo.Status.State = appv2.StatusSyncing
 	err = r.UpdateStatus(ctx, helmRepo)
 
@@ -265,7 +288,6 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 		logger.Error(err, "update status failed")
 		return reconcile.Result{}, err
 	}
-
 	credential := helmRepo.Spec.Credential
 	if err := application.ValidateRepoCredentialSecretRef(ctx, r.Client, helmRepo.GetWorkspace(), helmRepo.Spec.CredentialSecretRef); err != nil {
 		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
@@ -308,6 +330,11 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	if err != nil {
 		logger.Error(err, "load index failed", "url", repoURL)
 		return reconcile.Result{}, r.failRepoSync(ctx, helmRepo, err)
+	}
+	if !registry.IsOCI(helmRepo.Spec.Url) {
+		for _, versions := range index.Entries {
+			helmRepo.Status.Sync.ValidChartVersionCount += int64(len(filterVersions(versions)))
+		}
 	}
 	for _, warning := range indexWarnings {
 		logger.Info("skipped OCI artifact during repository sync", "warning", warning)
@@ -381,6 +408,7 @@ func (r *RepoReconciler) Reconcile(ctx context.Context, request reconcile.Reques
 	}
 
 	helmRepo.Status.State = appv2.StatusSuccessful
+	completeRepoSync(helmRepo, nil)
 	err = r.UpdateStatus(ctx, helmRepo)
 	if err != nil {
 		logger.Error(err, "update status failed")

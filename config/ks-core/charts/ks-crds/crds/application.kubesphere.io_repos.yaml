@@ -112,6 +112,39 @@ spec:
                 type: string
               state:
                 type: string
+              sync:
+                description: RepoSyncStatus defines the most recent synchronization result of a Repo.
+                properties:
+                  cacheHitCount:
+                    format: int64
+                    type: integer
+                  completedAt:
+                    format: date-time
+                    type: string
+                  durationSeconds:
+                    format: int64
+                    type: integer
+                  failedTagCount:
+                    format: int64
+                    type: integer
+                  lastError:
+                    type: string
+                  remoteTagCount:
+                    format: int64
+                    type: integer
+                  requestCount:
+                    format: int64
+                    type: integer
+                  skippedArtifactCount:
+                    format: int64
+                    type: integer
+                  startedAt:
+                    format: date-time
+                    type: string
+                  validChartVersionCount:
+                    format: int64
+                    type: integer
+                type: object
             type: object
         type: object
     served: true
