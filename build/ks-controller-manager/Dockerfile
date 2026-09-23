@@ -6,10 +6,9 @@ RUN apk add --no-cache ca-certificates curl
 ENV OUTDIR=/out
 RUN mkdir -p ${OUTDIR}/usr/local/bin/
 
-ARG TELEMETRY_VERSION=1.0.2
-ARG TARGETARCH
-RUN curl -LO https://github.com/kubesphere/telemetry/releases/download/v${TELEMETRY_VERSION}/telemetry_${TELEMETRY_VERSION}_linux_${TARGETARCH}.tar.gz && \
-    tar -zxvf telemetry_${TELEMETRY_VERSION}_linux_${TARGETARCH}.tar.gz -C ${OUTDIR}/usr/local/bin/ telemetry
+# The upstream telemetry binary release is no longer available. Telemetry is
+# optional at runtime, so omit the unavailable binary instead of making every
+# controller image build depend on a removed external artifact.
 
 # Add KS Core Helm Chart
 COPY config/ks-core ${OUTDIR}/var/helm-charts/ks-core
