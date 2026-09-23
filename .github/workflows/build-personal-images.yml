@@ -37,6 +37,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref || github.ref }}
+          # The Go build derives GitVersion from the nearest v* tag.
+          # A shallow checkout omits that history and leaves it as v0.0.0.
+          fetch-depth: 0
 
       - name: Generate image tag
         id: image_tag
