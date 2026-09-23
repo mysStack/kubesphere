@@ -6,6 +6,7 @@ package v2
 
 import (
 	"encoding/json"
+	v1 "k8s.io/api/core/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -542,6 +543,11 @@ func (in *RepoList) DeepCopyObject() runtime.Object {
 func (in *RepoSpec) DeepCopyInto(out *RepoSpec) {
 	*out = *in
 	in.Credential.DeepCopyInto(&out.Credential)
+	if in.CredentialSecretRef != nil {
+		in, out := &in.CredentialSecretRef, &out.CredentialSecretRef
+		*out = new(v1.SecretReference)
+		**out = **in
+	}
 	if in.SyncPeriod != nil {
 		in, out := &in.SyncPeriod, &out.SyncPeriod
 		*out = new(int)
