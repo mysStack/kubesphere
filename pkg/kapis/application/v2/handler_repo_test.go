@@ -54,7 +54,7 @@ func (c *conflictOnceManualSyncPatchClient) Patch(ctx context.Context, obj runti
 			}
 		}
 		if c.returnConflict {
-			return apierrors.NewConflict(schema.GroupResource{Group: appv2.GroupName, Resource: "repos"}, obj.GetName(), fmt.Errorf("injected conflict"))
+			return apierrors.NewConflict(schema.GroupResource{Group: appv2.SchemeGroupVersion.Group, Resource: "repos"}, obj.GetName(), fmt.Errorf("injected conflict"))
 		}
 	}
 	return c.Client.Patch(ctx, obj, patch, opts...)

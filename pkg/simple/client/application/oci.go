@@ -22,6 +22,7 @@ import (
 	"k8s.io/klog/v2"
 	appv2 "kubesphere.io/api/application/v2"
 	ksconstants "kubesphere.io/kubesphere/pkg/constants"
+	orasregistry "oras.land/oras-go/pkg/registry"
 
 	"kubesphere.io/kubesphere/pkg/simple/client/oci"
 )
@@ -121,19 +122,49 @@ func HelmPullFromOci(u string, cred appv2.RepoCredential) ([]byte, error) {
 		return nil, errors.New("invalid OCI chart URL")
 	}
 
-	client, err := newOCIRegistryClient(safeURL, cred)
+	// Use the project OCI client for pulls instead of Helm's registry client.
+	// Helm 3.16's resolver can downgrade a TLS registry request to HTTP for
+	// local/test registries, which breaks client certificates and insecure TLS
+	// verification. The project client keeps the configured HTTPS scheme and
+	// TLS transport for manifest and blob requests.
+	parsedRef, err := orasregistry.ParseReference(strings.TrimPrefix(safeURL, fmt.Sprintf("%s://", registry.OCIScheme)))
 	if err != nil {
 		return nil, err
 	}
 
-	pullRef := strings.TrimPrefix(safeURL, fmt.Sprintf("%s://", registry.OCIScheme))
-	pullResult, err := client.Pull(pullRef)
+	client, err := newOCIRegistry(safeURL, cred)
 	if err != nil {
-		klog.Errorf("An error occurred to pull chart from repository: %s,err:%v", pullRef, err)
+		klog.Errorf("An error occurred to pull chart from repository: %s,err:%v", parsedRef.String(), err)
 		return nil, err
 	}
+	// Keep the explicit registry probe for plain-HTTP registries. Besides
+	// validating the endpoint, this preserves the authentication handshake
+	// expected by registries that challenge on /v2/ before serving manifests.
+	if cred.PlainHTTP {
+		if err := client.Ping(context.Background()); err != nil {
+			klog.Errorf("An error occurred to ping OCI repository: %s,err:%v", parsedRef.Registry, err)
+			return nil, err
+		}
+	}
 
-	return pullResult.Chart.Data, nil
+	manifest, err := client.FetchManifest(context.Background(), parsedRef.Repository, parsedRef.Reference)
+	if err != nil {
+		klog.Errorf("An error occurred to pull chart from repository: %s,err:%v", parsedRef.String(), err)
+		return nil, err
+	}
+	for _, layer := range manifest.Layers {
+		if layer.MediaType != registry.ChartLayerMediaType && layer.MediaType != registry.LegacyChartLayerMediaType {
+			continue
+		}
+		chartData, err := client.FetchBlob(context.Background(), parsedRef.Repository, layer)
+		if err != nil {
+			klog.Errorf("An error occurred to pull chart blob from repository: %s,err:%v", parsedRef.String(), err)
+			return nil, err
+		}
+		return chartData, nil
+	}
+
+	return nil, fmt.Errorf("manifest does not contain a Helm chart layer")
 }
 
 func LoadRepoIndexFromOci(u string, cred appv2.RepoCredential) (idx helmrepo.IndexFile, err error) {
