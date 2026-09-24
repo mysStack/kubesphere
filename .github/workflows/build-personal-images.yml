@@ -32,6 +32,8 @@ jobs:
             dockerfile: build/ks-apiserver/Dockerfile
           - image: ks-controller-manager
             dockerfile: build/ks-controller-manager/Dockerfile
+          - image: ks-helm-executor
+            dockerfile: build/helm-executor/Dockerfile
     env:
       IMAGE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
