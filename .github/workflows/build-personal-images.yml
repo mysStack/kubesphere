@@ -11,9 +11,8 @@ on:
         required: false
         type: string
       tag:
-        description: Base image tag (the workflow appends date and commit SHA)
+        description: Optional image tag prefix; defaults to the source branch name
         required: false
-        default: oci-repo
         type: string
       image:
         description: Image to build
@@ -53,8 +52,10 @@ jobs:
       - name: Generate image tag
         id: image_tag
         env:
-          BASE_TAG: ${{ inputs.tag || github.ref_name }}
-        run: echo "value=${BASE_TAG}-$(TZ=Asia/Shanghai date +%Y%m%d)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          BASE_TAG: ${{ inputs.tag || inputs.source_ref || github.ref_name }}
+        run: |
+          NORMALIZED_TAG=$(printf '%s' "$BASE_TAG" | tr '/:@' '-')
+          echo "value=${NORMALIZED_TAG}-$(TZ=Asia/Shanghai date +%Y%m%d)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
