@@ -34,3 +34,8 @@ tmp/
 _tmp
 kubesphere.yaml
 testbin/
+
+# Claude Code local handoff/session state
+.claude/sessions/
+.claude-handoff.json
+.gitignore.bak-*
