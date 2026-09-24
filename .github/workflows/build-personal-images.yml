@@ -7,14 +7,23 @@ on:
   workflow_dispatch:
     inputs:
       source_ref:
-        description: Git branch, tag, or commit SHA to build
-        required: true
-        default: master
+        description: Optional branch, tag, or commit SHA; defaults to the branch selected in Actions
+        required: false
         type: string
       tag:
-        description: Image tag to publish
-        required: true
+        description: Base image tag (the workflow appends date and commit SHA)
+        required: false
+        default: oci-repo
         type: string
+      image:
+        description: Image to build
+        required: true
+        default: ks-controller-manager
+        type: choice
+        options:
+          - ks-controller-manager
+          - ks-apiserver
+          - all
 
 permissions:
   contents: read
@@ -32,8 +41,6 @@ jobs:
             dockerfile: build/ks-apiserver/Dockerfile
           - image: ks-controller-manager
             dockerfile: build/ks-controller-manager/Dockerfile
-    env:
-      IMAGE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -71,6 +78,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and publish image
+        if: github.event_name != 'workflow_dispatch' || inputs.image == 'all' || inputs.image == matrix.image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -78,5 +86,5 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            docker.io/mingys/${{ matrix.image }}:${{ env.IMAGE_TAG }}
-            ghcr.io/mysstack/${{ matrix.image }}:${{ env.IMAGE_TAG }}
+            docker.io/mingys/${{ matrix.image }}:${{ steps.image_tag.outputs.value }}
+            ghcr.io/mysstack/${{ matrix.image }}:${{ steps.image_tag.outputs.value }}
