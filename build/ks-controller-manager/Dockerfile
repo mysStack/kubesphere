@@ -18,6 +18,8 @@ RUN KUBE_BUILD_PLATFORMS="${TARGETOS}/${TARGETARCH}" make ks-controller-manager 
 FROM alpine:3.21.3
 
 COPY --from=build_context /workspace/_output/bin/ks-controller-manager /usr/local/bin/
+# ks-core 1.1.5 使用 controller-manager 作为容器启动命令；保留两个名称，兼容新旧 Chart。
+RUN ln -s /usr/local/bin/ks-controller-manager /usr/local/bin/controller-manager
 # COPY --from=build_context /workspace/_output/bin/telemetry /usr/local/bin/
 COPY config/ks-core /var/helm-charts/ks-core
 
