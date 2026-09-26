@@ -1,6 +1,7 @@
 package application
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -62,6 +63,26 @@ func TestDownLoadChartUsesRepoCredentialSecret(t *testing.T) {
 	_, _ = DownLoadChart(client, fmt.Sprintf("oci://%s/charts/demo:1.0.0", server.Listener.Addr()), repo.Name)
 	if !usedSecretCredential {
 		t.Fatal("OCI chart download did not use credentialSecretRef")
+	}
+}
+
+func TestLoadRepoCredentialSecretRejectsNonKubeSphereNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core API to scheme: %v", err)
+	}
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "user-secrets", Name: "repo-cred"},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{"password": []byte("secret")},
+	}).Build()
+
+	err := LoadRepoCredentialSecret(context.Background(), reader, &corev1.SecretReference{
+		Namespace: "user-secrets",
+		Name:      "repo-cred",
+	}, &appv2.RepoCredential{})
+	if err == nil {
+		t.Fatal("expected a credential namespace validation error")
 	}
 }
 

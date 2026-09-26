@@ -64,6 +64,9 @@ func LoadRepoCredentialSecret(ctx context.Context, reader client.Reader, ref *co
 	if ref.Name == "" {
 		return fmt.Errorf("credentialSecretRef.name is required")
 	}
+	if ref.Namespace != "" && ref.Namespace != constants.KubeSphereNamespace {
+		return fmt.Errorf("credentialSecretRef.namespace must be %q", constants.KubeSphereNamespace)
+	}
 
 	namespace := ref.Namespace
 	if namespace == "" {
