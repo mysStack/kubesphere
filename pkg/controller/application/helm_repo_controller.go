@@ -214,7 +214,7 @@ func (r *RepoReconciler) skipSync(helmRepo *appv2.Repo) (bool, error) {
 		return true, nil
 	}
 	passed := time.Since(helmRepo.Status.LastUpdateTime.Time).Seconds()
-	if helmRepo.Status.State == appv2.StatusSuccessful && passed < float64(*helmRepo.Spec.SyncPeriod) {
+	if (helmRepo.Status.State == appv2.StatusSuccessful || helmRepo.Status.State == appv2.StatusFailed) && passed < float64(*helmRepo.Spec.SyncPeriod) {
 		logger.V(4).Info(fmt.Sprintf("last sync time is %s, passed %f, no need to sync", helmRepo.Status.LastUpdateTime, passed))
 		return true, nil
 	}

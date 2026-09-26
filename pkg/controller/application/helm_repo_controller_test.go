@@ -311,6 +311,27 @@ func TestRepoReconcilerConsumesTriggerAddedAfterCachedGet(t *testing.T) {
 	}
 }
 
+func TestRepoReconcilerThrottlesAutomaticRetriesAfterFailure(t *testing.T) {
+	now := metav1.Now()
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "failed-retry-throttle"},
+		Spec:       appv2.RepoSpec{SyncPeriod: ptr.To(300)},
+		Status: appv2.RepoStatus{
+			State:          appv2.StatusFailed,
+			LastUpdateTime: now,
+		},
+	}
+	reconciler := &RepoReconciler{}
+
+	noSync, err := reconciler.skipSync(repo)
+	if err != nil {
+		t.Fatalf("skipSync() error = %v", err)
+	}
+	if !noSync {
+		t.Fatal("skipSync() = false, want failed repository retry to respect sync period")
+	}
+}
+
 func TestRepoReconcilerConsumeOCIFullRefresh(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
