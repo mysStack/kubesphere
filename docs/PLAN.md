@@ -88,9 +88,9 @@ feature/oci-performance-cache（已验证功能基线）
 - [x] OCI 请求超时、TLS、Basic Auth、Client Certificate、Plain HTTP 测试覆盖。
 - [x] Console 增加“立即同步”入口，后端同步保持异步执行。
 - [x] 前后端个人镜像 Action 已配置，并完成测试环境构建和部署验证。
-- [~] P0：私有 Helm/OCI 仓库凭据管理。Console 支持创建或选择受 Workspace 边界保护的仓库凭据；Repo 仅保存 Secret 引用，验证、同步和部署复用该引用，凭据不回传、不出现在 URL、Status、Event 或日志中。
-- [ ] 扩展 Repo 状态：同步开始时间、结束时间、耗时、版本数量、缓存命中数、最近错误。
-- [ ] 为 OCI 失败场景补充可读的 Status Reason、Kubernetes Event 和 Console 错误展示。
+- [x] P0：私有 Helm/OCI 仓库凭据管理。Console 支持创建或选择受 Workspace 边界保护的仓库凭据；Repo 仅保存 Secret 引用，验证、同步和部署复用该引用，凭据不回传、不出现在 URL、Status、Event 或日志中。
+- [x] 扩展 Repo 状态：同步开始时间、结束时间、耗时、版本数量、缓存命中数、最近错误。
+- [x] 为 OCI 失败场景补充可读的 Status Reason、Kubernetes Event 和 Console 错误展示。
 
 验收标准：添加、验证、手动同步 OCI 仓库不阻塞 API；有效 Chart 能出现在商店并可部署；辅助 Artifact 不造成失败；失败时能区分超时、429、认证、无效 Chart 和 Registry 不可达。
 
@@ -152,13 +152,13 @@ feature/oci-performance-cache（已验证功能基线）
 
 目标：让 Console 能区分“仓库可用”“正在同步”“发现新版本”“上次同步失败”。
 
-- [ ] Repo 状态统一为 `Ready`、`Syncing`、`NewVersionDetected`、`Failed`、`Stale` 等可读状态。
-- [ ] 手动同步 API 返回快速响应，重复点击具有幂等行为；正在执行时返回当前任务信息。
-- [ ] Console 显示开始时间、进度、最近成功时间、耗时、版本统计和失败原因。
-- [ ] 定时 Job 和“立即同步”复用同一个后台同步入口，不复制同步逻辑。
-- [ ] 支持只新增、更新全量、重新验证三种明确动作；默认动作在 UI 中清晰标注。
+- [x] Repo 状态在 Console 统一展示为 `Ready`、`Syncing`、`Failed`、`Stale` 等可读状态；`NewVersionDetected` 暂不引入，因为当前同步协议没有可靠的未发布版本语义。
+- [x] 手动同步 API 返回快速响应，重复点击具有幂等行为；正在执行时返回当前 Repo 状态快照。
+- [x] Console 显示开始时间、最近成功时间、耗时、版本统计、缓存统计和失败原因；不伪造百分比进度。
+- [x] 定时 Job 和“立即同步”复用同一个后台同步入口，不复制同步逻辑。
+- [x] 支持增量同步、OCI 全量校验、保存前连接验证三种明确动作；默认动作在 UI 中清晰标注。
 - [ ] 商店版本列表在同步完成后自动刷新，不要求用户重新进入页面。
-- [ ] 增加仓库诊断入口，显示最近事件和推荐处理方式，但不暴露密码或 Token。
+- [x] 增加仓库诊断入口，显示最近同步统计、错误和 Kubernetes Events，但不暴露密码或 Token。
 
 验收标准：用户点击立即同步后页面不超时；状态最终可收敛到成功或失败；新版本能刷新到应用部署选择列表；错误不再只显示“同步中”。
 
@@ -166,6 +166,12 @@ feature/oci-performance-cache（已验证功能基线）
 
 - Console 将后端 `manualTrigger`（已排队）按“同步中”展示，避免出现未翻译状态或旧成功摘要；同步中和排队中的仓库均禁止重复触发。
 - 用户发起增量同步或 OCI 全量校验后，Console 只轮询被触发仓库所在的列表；收到 `successful` 或 `failed` 等终态即停止轮询，不增加后端任务系统。
+
+阶段三收尾（2026-09-27）：
+
+- 手动同步接口在触发器已存在或 Repo 已处于同步态时返回 `alreadyRunning`，不覆盖原触发器；响应仅包含 Repo 状态快照，不包含凭据或 Secret 内容。
+- Repo 详情新增同步诊断页，展示生命周期时间、耗时、版本/Artifact、请求/缓存命中和已脱敏错误；列表增加 `Stale` 展示，按同步周期计算且不修改 CRD 状态。
+- 仍保留“商店版本列表同步完成后自动刷新”作为后续项：当前列表页只轮询仓库状态，应用部署选择页在下一次查询时读取最新版本，避免引入跨页面实时推送或任务系统。
 
 ## 阶段四：Kubernetes Gateway API 基础接入
 
