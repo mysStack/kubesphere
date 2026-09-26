@@ -37,6 +37,19 @@ import (
 )
 
 var errFullRefreshRequiresOCI = stderrs.New("full refresh is only supported for OCI repositories")
+var errManualSyncAlreadyRunning = stderrs.New("repository sync is already running")
+
+type manualSyncRepoSnapshot struct {
+	Name   string           `json:"name"`
+	Status appv2.RepoStatus `json:"status"`
+}
+
+type manualSyncResponse struct {
+	Accepted       bool                   `json:"accepted"`
+	AlreadyRunning bool                   `json:"alreadyRunning"`
+	Mode           string                 `json:"mode"`
+	Repo           manualSyncRepoSnapshot `json:"repo"`
+}
 
 func (h *appHandler) CreateOrUpdateRepo(req *restful.Request, resp *restful.Response) {
 
@@ -187,6 +200,10 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 		api.HandleBadRequest(resp, req, errFullRefreshRequiresOCI)
 		return
 	}
+	if isRepoSyncInProgress(repo) {
+		writeManualSyncResponse(resp, repo, true)
+		return
+	}
 	trigger := strconv.FormatInt(time.Now().UnixNano(), 10)
 	var acceptedRepo *appv2.Repo
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -196,6 +213,10 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 		}
 		if fullRefresh && !registry.IsOCI(current.Spec.Url) {
 			return errFullRefreshRequiresOCI
+		}
+		if isRepoSyncInProgress(current) {
+			acceptedRepo = current.DeepCopy()
+			return errManualSyncAlreadyRunning
 		}
 		before := current.DeepCopy()
 		if current.Annotations == nil {
@@ -216,6 +237,10 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 			api.HandleBadRequest(resp, req, err)
 			return
 		}
+		if stderrs.Is(err, errManualSyncAlreadyRunning) {
+			writeManualSyncResponse(resp, acceptedRepo, true)
+			return
+		}
 		api.HandleInternalError(resp, nil, err)
 		return
 	}
@@ -223,7 +248,33 @@ func (h *appHandler) ManualSync(req *restful.Request, resp *restful.Response) {
 	if err := h.client.Status().Update(req.Request.Context(), acceptedRepo); err != nil {
 		klog.ErrorS(err, "update manual sync status failed", "repo", repoId)
 	}
-	resp.WriteEntity(errors.None)
+	writeManualSyncResponse(resp, acceptedRepo, false)
+}
+
+func isRepoSyncInProgress(repo *appv2.Repo) bool {
+	if repo == nil {
+		return false
+	}
+	if repo.Annotations[appv2.ManualSyncTriggerAnnotation] != "" {
+		return true
+	}
+	return repo.Status.State == appv2.StatusManualTrigger || repo.Status.State == appv2.StatusSyncing
+}
+
+func writeManualSyncResponse(resp *restful.Response, repo *appv2.Repo, alreadyRunning bool) {
+	mode := "incremental"
+	if repo != nil && repo.Annotations[appv2.FullRefreshTriggerAnnotation] != "" {
+		mode = "full"
+	}
+	result := manualSyncResponse{
+		Accepted:       true,
+		AlreadyRunning: alreadyRunning,
+		Mode:           mode,
+	}
+	if repo != nil {
+		result.Repo = manualSyncRepoSnapshot{Name: repo.Name, Status: repo.Status}
+	}
+	resp.WriteEntity(result)
 }
 
 func (h *appHandler) DescribeRepo(req *restful.Request, resp *restful.Response) {

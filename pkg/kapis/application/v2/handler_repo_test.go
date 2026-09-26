@@ -494,6 +494,85 @@ func TestManualSyncTriggersRepoUpdateAndSetsStatus(t *testing.T) {
 	}
 }
 
+func TestManualSyncReturnsExistingRunWithoutReplacingTrigger(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "manual-sync-already-running",
+			Annotations: map[string]string{appv2.ManualSyncTriggerAnnotation: "first-trigger"},
+		},
+		Status: appv2.RepoStatus{State: appv2.StatusSyncing},
+	}
+	h := &appHandler{client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(repo).WithObjects(repo).Build()}
+	ws := new(restful.WebService)
+	ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+	ws.Route(ws.POST("/repos/{repo}/action").To(h.ManualSync))
+	container := restful.NewContainer()
+	container.Add(ws)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/repos/manual-sync-already-running/action", nil)
+	req.Header.Set("Content-Type", restful.MIME_JSON)
+	container.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("manual sync status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var response struct {
+		Accepted       bool   `json:"accepted"`
+		AlreadyRunning bool   `json:"alreadyRunning"`
+		Mode           string `json:"mode"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode manual sync response: %v", err)
+	}
+	if !response.Accepted || !response.AlreadyRunning || response.Mode != "incremental" {
+		t.Fatalf("manual sync response = %#v, want accepted incremental existing run", response)
+	}
+
+	updated := &appv2.Repo{}
+	if err := h.client.Get(context.Background(), runtimeclient.ObjectKey{Name: repo.Name}, updated); err != nil {
+		t.Fatalf("get repo after manual sync: %v", err)
+	}
+	if got := updated.Annotations[appv2.ManualSyncTriggerAnnotation]; got != "first-trigger" {
+		t.Fatalf("manual trigger = %q, want existing first-trigger", got)
+	}
+}
+
+func TestManualSyncResponseDoesNotExposeInlineCredential(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appv2.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	repo := &appv2.Repo{
+		ObjectMeta: metav1.ObjectMeta{Name: "manual-sync-redacted"},
+		Spec: appv2.RepoSpec{
+			Url:        "oci://registry.example.invalid/charts",
+			Credential: appv2.RepoCredential{Username: "private-user", Password: "private-token"},
+		},
+		Status: appv2.RepoStatus{State: appv2.StatusSuccessful},
+	}
+	h := &appHandler{client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(repo).WithObjects(repo).Build()}
+	ws := new(restful.WebService)
+	ws.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
+	ws.Route(ws.POST("/repos/{repo}/action").To(h.ManualSync))
+	container := restful.NewContainer()
+	container.Add(ws)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/repos/manual-sync-redacted/action", nil)
+	req.Header.Set("Content-Type", restful.MIME_JSON)
+	container.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("manual sync status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "private-user") || strings.Contains(recorder.Body.String(), "private-token") {
+		t.Fatalf("manual sync response exposes inline credential: %s", recorder.Body.String())
+	}
+}
+
 func TestManualSyncAcceptsRequestWhenStatusUpdateFails(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := appv2.AddToScheme(scheme); err != nil {
