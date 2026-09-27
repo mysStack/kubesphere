@@ -28,7 +28,7 @@ type NodeShellOptions struct {
 func NewOptions() *Options {
 	return &Options{
 		KubectlOptions: KubectlOptions{
-			Image: "kubesphere/kubectl:v1.27.4",
+			Image: "mingys/ks-helm-executor:v3.22.0-kubectl-v1.33.4",
 		},
 		NodeShellOptions: NodeShellOptions{
 			Image:   "alpine:3.15",

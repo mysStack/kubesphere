@@ -45,7 +45,15 @@ jobs:
         id: image_tag
         env:
           BASE_TAG: ${{ inputs.tag || github.ref_name }}
-        run: echo "value=${BASE_TAG}-$(TZ=Asia/Shanghai date +%Y%m%d)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          # Stable release tags are immutable release identifiers. Test and
+          # manual builds keep the date/commit suffix to avoid collisions.
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            value="${BASE_TAG}"
+          else
+            value="${BASE_TAG}-$(TZ=Asia/Shanghai date +%Y%m%d)-$(git rev-parse --short=7 HEAD)"
+          fi
+          echo "value=${value}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3

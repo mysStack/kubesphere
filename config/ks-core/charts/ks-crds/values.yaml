@@ -6,8 +6,8 @@ global:
 kubectl:
   image:
     registry: ""
-    repository: kubesphere/kubectl
-    tag: "v1.27.16"
+    repository: mingys/ks-helm-executor
+    tag: "v3.22.0-kubectl-v1.33.4"
     pullPolicy: IfNotPresent
   resources:
     limits:

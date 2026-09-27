@@ -247,9 +247,8 @@ helmExecutor:
   jobTTLAfterFinished: 0s
   image:
     registry: ""
-    # This image carries Helm 3.22.0 and kubectl 1.33.4.  Keep it separate
-    # from the terminal and CRD hook images: only application deployment jobs
-    # need the Helm CLI runtime.
+    # This image carries Helm 3.22.0 and kubectl 1.33.4 and is shared by
+    # application deployment, terminal, and CRD hook jobs.
     repository: mingys/ks-helm-executor
     tag: "v3.22.0-kubectl-v1.33.4"
     pullPolicy: IfNotPresent
@@ -288,8 +287,8 @@ composedApp:
 kubectl:
   image:
     registry: ""
-    repository: kubesphere/kubectl
-    tag: "v1.27.16"
+    repository: mingys/ks-helm-executor
+    tag: "v3.22.0-kubectl-v1.33.4"
     pullPolicy: IfNotPresent
 
 ingress:
@@ -318,8 +317,8 @@ certmanager:
 nodeShell:
   image:
     registry: ""
-    repository: kubesphere/kubectl
-    tag: "v1.27.16"
+    repository: mingys/ks-helm-executor
+    tag: "v3.22.0-kubectl-v1.33.4"
     pullPolicy: IfNotPresent
 
 # Telemetry collects aggregated information about the versions of KubeSphere, Kubernetes, and the extensions used.
@@ -446,8 +445,8 @@ ksCRDs:
   kubectl:
     image:
       registry: ""
-      repository: kubesphere/kubectl
-      tag: "v1.27.16"
+      repository: mingys/ks-helm-executor
+      tag: "v3.22.0-kubectl-v1.33.4"
       pullPolicy: IfNotPresent
 
 # add museum for all ks-extensions
