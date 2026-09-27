@@ -1,0 +1,68 @@
+name: Build Helm Executor Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Git branch, tag, or commit SHA to build
+        required: true
+        default: upgrade/v4.1.4-oci
+        type: string
+      tag:
+        description: Image tag to publish (without the date and commit suffix)
+        required: true
+        default: v3.22.0-kubectl-v1.33.4
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build and publish ks-helm-executor
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Generate image tag
+        id: image_tag
+        env:
+          BASE_TAG: ${{ inputs.tag }}
+        run: echo "value=${BASE_TAG}-$(TZ=Asia/Shanghai date +%Y%m%d)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: mingys
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/helm-executor/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            docker.io/mingys/ks-helm-executor:${{ steps.image_tag.outputs.value }}
+            ghcr.io/mysstack/ks-helm-executor:${{ steps.image_tag.outputs.value }}

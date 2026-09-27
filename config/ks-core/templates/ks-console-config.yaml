@@ -28,7 +28,11 @@ data:
         kubesphere: {{ .Chart.AppVersion }}
         kubernetes: {{ .Capabilities.KubeVersion.Version }}
       isWarningHeaderNotificationEnabled: {{ not (or (empty .Values.experimental.validationDirective) (eq .Values.experimental.validationDirective "Ignore")) }}
-      {{- with .Values.console.config }}
+      {{- $consoleConfig := default dict .Values.console.config }}
+      {{- if not (hasKey $consoleConfig "enableKubeConfig") }}
+      enableKubeConfig: true
+      {{- end }}
+      {{- with $consoleConfig }}
       {{- toYaml . | nindent 6 }}
       {{- end }}
 kind: ConfigMap
