@@ -150,6 +150,8 @@ helm upgrade --install -n kubesphere-system --create-namespace ks-core oci://doc
   --set ksExtensionRepository.image.tag=v1.1.6
 ```
 
+> 仅用于验证高版本扩展兼容性时，可额外设置 `--set extension.ignoreCompatibilityVersion=true`。该开关只跳过扩展声明的 KubeSphere/Kubernetes 版本限制，不会伪造平台版本，也不会补齐高版本 API；测试完成后应恢复为 `false`。
+
 ### 在托管 Kubernetes 上部署 KubeSphere
 
 KubeSphere 托管在以下云供应商上，您可以通过在其托管的 Kubernetes 服务上一键安装来部署 KubeSphere。

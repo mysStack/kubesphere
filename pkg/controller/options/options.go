@@ -77,9 +77,10 @@ type ExtensionIngressOptions struct {
 }
 
 type ExtensionOptions struct {
-	ImageRegistry string                   `json:"imageRegistry,omitempty" yaml:"imageRegistry,omitempty" mapstructure:"imageRegistry,omitempty"`
-	NodeSelector  map[string]string        `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty" mapstructure:"nodeSelector,omitempty"`
-	Ingress       *ExtensionIngressOptions `json:"ingress,omitempty" yaml:"ingress,omitempty" mapstructure:"ingress,omitempty"`
+	ImageRegistry              string                   `json:"imageRegistry,omitempty" yaml:"imageRegistry,omitempty" mapstructure:"imageRegistry,omitempty"`
+	NodeSelector               map[string]string        `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty" mapstructure:"nodeSelector,omitempty"`
+	Ingress                    *ExtensionIngressOptions `json:"ingress,omitempty" yaml:"ingress,omitempty" mapstructure:"ingress,omitempty"`
+	IgnoreCompatibilityVersion bool                     `json:"ignoreCompatibilityVersion,omitempty" yaml:"ignoreCompatibilityVersion,omitempty" mapstructure:"ignoreCompatibilityVersion,omitempty"`
 }
 
 func NewExtensionOptions() *ExtensionOptions {

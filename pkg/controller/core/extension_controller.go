@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kscontroller "kubesphere.io/kubesphere/pkg/controller"
+	"kubesphere.io/kubesphere/pkg/controller/options"
 )
 
 const (
@@ -52,13 +53,15 @@ func (r *ExtensionReconciler) Enabled(clusterRole string) bool {
 
 type ExtensionReconciler struct {
 	client.Client
-	k8sVersion *semver.Version
-	logger     logr.Logger
+	k8sVersion       *semver.Version
+	extensionOptions *options.ExtensionOptions
+	logger           logr.Logger
 }
 
 func (r *ExtensionReconciler) SetupWithManager(mgr *kscontroller.Manager) error {
 	r.Client = mgr.GetClient()
 	r.k8sVersion = mgr.K8sVersion
+	r.extensionOptions = mgr.ExtensionOptions
 	r.logger = ctrl.Log.WithName("controllers").WithName(extensionController)
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(extensionController).
@@ -168,7 +171,8 @@ func (r *ExtensionReconciler) syncExtensionStatus(ctx context.Context, extension
 			return errors.Wrap(err, "failed to get extension")
 		}
 		expected := extension.DeepCopy()
-		if recommended, err := getRecommendedExtensionVersion(versionList.Items, r.k8sVersion); err == nil {
+		ignoreCompatibilityVersion := r.extensionOptions != nil && r.extensionOptions.IgnoreCompatibilityVersion
+		if recommended, err := getRecommendedExtensionVersion(versionList.Items, r.k8sVersion, ignoreCompatibilityVersion); err == nil {
 			expected.Status.RecommendedVersion = recommended
 		} else {
 			klog.FromContext(ctx).Error(err, "failed to get recommended extension version")

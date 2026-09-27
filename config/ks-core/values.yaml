@@ -330,6 +330,8 @@ telemetry:
 extension:
   imageRegistry: ""
   nodeSelector: {}
+  # Test-only switch. When enabled, extension version compatibility checks are skipped.
+  ignoreCompatibilityVersion: false
   ingress:
     ingressClassName: ""
     # The domain name suffix used to create the ingress of each extension.

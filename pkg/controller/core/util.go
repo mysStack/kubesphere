@@ -48,19 +48,23 @@ import (
 const ExtensionVersionMaxLength = validation.LabelValueMaxLength
 const ExtensionNameMaxLength = validation.LabelValueMaxLength
 
-func getRecommendedExtensionVersion(versions []corev1alpha1.ExtensionVersion, k8sVersion *semver.Version) (string, error) {
+func getRecommendedExtensionVersion(versions []corev1alpha1.ExtensionVersion, k8sVersion *semver.Version, ignoreCompatibilityVersion bool) (string, error) {
 	if len(versions) == 0 {
 		return "", nil
 	}
 
-	ksVersion, err := semver.NewVersion(version.Get().GitVersion)
-	if err != nil {
-		return "", errors.Wrapf(err, "failed to parse KS version: %s", version.Get().GitVersion)
+	var ksVersion *semver.Version
+	if !ignoreCompatibilityVersion {
+		var err error
+		ksVersion, err = semver.NewVersion(version.Get().GitVersion)
+		if err != nil {
+			return "", errors.Wrapf(err, "failed to parse KS version: %s", version.Get().GitVersion)
+		}
 	}
 
 	var matchedVersions []*semver.Version
 	for _, v := range versions {
-		kubeVersionMatched, ksVersionMatched := matchVersionConstraints(v, k8sVersion, ksVersion)
+		kubeVersionMatched, ksVersionMatched := matchVersionConstraints(v, k8sVersion, ksVersion, ignoreCompatibilityVersion)
 		if kubeVersionMatched && ksVersionMatched {
 			targetVersion, err := semver.NewVersion(v.Spec.Version)
 			if err != nil {
@@ -82,7 +86,10 @@ func getRecommendedExtensionVersion(versions []corev1alpha1.ExtensionVersion, k8
 	return matchedVersions[0].Original(), nil
 }
 
-func matchVersionConstraints(v corev1alpha1.ExtensionVersion, k8sVersion, ksVersion *semver.Version) (bool, bool) {
+func matchVersionConstraints(v corev1alpha1.ExtensionVersion, k8sVersion, ksVersion *semver.Version, ignoreCompatibilityVersion bool) (bool, bool) {
+	if ignoreCompatibilityVersion {
+		return true, true
+	}
 	kubeVersionMatched := v.Spec.KubeVersion == "" || checkVersionConstraint(v.Spec.KubeVersion, k8sVersion)
 	ksVersionMatched := v.Spec.KSVersion == "" || checkVersionConstraint(v.Spec.KSVersion, ksVersion)
 	return kubeVersionMatched, ksVersionMatched

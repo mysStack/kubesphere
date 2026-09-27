@@ -22,11 +22,12 @@ func TestGetRecommendedExtensionVersion(t *testing.T) {
 	k8sVersion120, _ := semver.NewVersion("1.20.0")
 	k8sVersion125, _ := semver.NewVersion("1.25.4")
 	tests := []struct {
-		name       string
-		versions   []corev1alpha1.ExtensionVersion
-		k8sVersion *semver.Version
-		ksVersion  string
-		wanted     string
+		name                       string
+		versions                   []corev1alpha1.ExtensionVersion
+		k8sVersion                 *semver.Version
+		ksVersion                  string
+		ignoreCompatibilityVersion bool
+		wanted                     string
 	}{
 		{
 			name: "normal test",
@@ -87,6 +88,22 @@ func TestGetRecommendedExtensionVersion(t *testing.T) {
 			wanted:     "",
 		},
 		{
+			name: "ignore compatibility version",
+			versions: []corev1alpha1.ExtensionVersion{
+				{
+					Spec: corev1alpha1.ExtensionVersionSpec{
+						Version:     "1.2.0",
+						KubeVersion: ">=1.21.0",
+						KSVersion:   ">=4.2.1-0",
+					},
+				},
+			},
+			k8sVersion:                 k8sVersion120,
+			ksVersion:                  "4.1.4",
+			ignoreCompatibilityVersion: true,
+			wanted:                     "1.2.0",
+		},
+		{
 			name: "match 1.3.0",
 			versions: []corev1alpha1.ExtensionVersion{
 				{
@@ -112,7 +129,7 @@ func TestGetRecommendedExtensionVersion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			version.SetGitVersion(tt.ksVersion)
-			if got, _ := getRecommendedExtensionVersion(tt.versions, tt.k8sVersion); got != tt.wanted {
+			if got, _ := getRecommendedExtensionVersion(tt.versions, tt.k8sVersion, tt.ignoreCompatibilityVersion); got != tt.wanted {
 				t.Errorf("getRecommendedExtensionVersion() = %v, want %v", got, tt.wanted)
 			}
 		})

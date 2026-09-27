@@ -68,6 +68,7 @@ data:
         cacheTTL: {{ default "0s" $oci.cacheTTL }}
     extension:
       imageRegistry: {{ default .Values.extension.imageRegistry "" | quote }}
+      ignoreCompatibilityVersion: {{ default false .Values.extension.ignoreCompatibilityVersion }}
       {{- if .Values.extension.nodeSelector }}
       nodeSelector: {{- toYaml .Values.extension.nodeSelector | nindent 8 }}
       {{- end }}

@@ -160,6 +160,8 @@ helm upgrade --install -n kubesphere-system --create-namespace ks-core oci://doc
   --set ksExtensionRepository.image.tag=v1.1.6
 ```
 
+> For temporary compatibility testing of a newer extension, add `--set extension.ignoreCompatibilityVersion=true`. This only skips the extension's declared KubeSphere/Kubernetes version constraints; it neither changes the reported platform version nor provides newer APIs. Set it back to `false` after testing.
+
 ### KubeSphere for hosted Kubernetes services
 
 KubeSphere is hosted on the following cloud providers, and you can try KubeSphere by one-click installation on their
