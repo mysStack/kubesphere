@@ -14,6 +14,7 @@ import (
 	"kubesphere.io/kubesphere/pkg/apiserver/auditing"
 	"kubesphere.io/kubesphere/pkg/apiserver/authentication"
 	"kubesphere.io/kubesphere/pkg/apiserver/authorization"
+	controlleroptions "kubesphere.io/kubesphere/pkg/controller/options"
 	"kubesphere.io/kubesphere/pkg/models/terminal"
 	"kubesphere.io/kubesphere/pkg/multicluster"
 	"kubesphere.io/kubesphere/pkg/simple/client/cache"
@@ -21,13 +22,14 @@ import (
 )
 
 type Options struct {
-	MultiClusterOptions   *multicluster.Options       `json:"multicluster"`
-	AuthenticationOptions *authentication.Options     `json:"-"`
-	KubernetesOptions     *k8s.Options                `json:"-"`
-	CacheOptions          *cache.Options              `json:"-"`
-	AuthorizationOptions  *authorization.Options      `json:"-"`
-	AuditingOptions       *auditing.Options           `json:"-"`
-	TerminalOptions       *terminal.Options           `json:"-"`
-	S3Options             *s3.Options                 `json:"-"`
-	ExperimentalOptions   *config.ExperimentalOptions `json:"-"`
+	MultiClusterOptions   *multicluster.Options               `json:"multicluster"`
+	AuthenticationOptions *authentication.Options             `json:"-"`
+	KubernetesOptions     *k8s.Options                        `json:"-"`
+	CacheOptions          *cache.Options                      `json:"-"`
+	AuthorizationOptions  *authorization.Options              `json:"-"`
+	AuditingOptions       *auditing.Options                   `json:"-"`
+	TerminalOptions       *terminal.Options                   `json:"-"`
+	S3Options             *s3.Options                         `json:"-"`
+	ExperimentalOptions   *config.ExperimentalOptions         `json:"-"`
+	ExtensionOptions      *controlleroptions.ExtensionOptions `json:"extension,omitempty"`
 }

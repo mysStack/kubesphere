@@ -188,4 +188,7 @@ func (s *APIServerOptions) Merge(conf *config.Config) {
 	if conf.ExperimentalOptions != nil {
 		s.ExperimentalOptions = conf.ExperimentalOptions
 	}
+	if conf.ExtensionOptions != nil {
+		s.ExtensionOptions = conf.ExtensionOptions
+	}
 }
