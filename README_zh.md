@@ -119,7 +119,7 @@ KubeSphere 4.x，采用了微内核 + 扩展组件的架构（[代号 LuBan](htt
 
 ## 最新版本
 
-🎉 KubeSphere 4.1.2 全新发布！！多项功能与体验优化，带来更好的产品体验，详见 [v4.1.2 版本说明](https://kubesphere.io/docs/v4.1/20-release-notes/release-v412/) 。
+🎉 本项目发布 KubeSphere v4.1.4，包含 OCI 应用仓库支持以及基于 Helm 3.22 的部署工具链。
 
 ## 安装
 
@@ -131,14 +131,23 @@ KubeSphere 支持在任意平台运行，从本地数据中心到混合多云再
 运行以下命令以在现有 Kubernetes 集群上安装 KubeSphere：
 
 ```bash
-helm upgrade --install -n kubesphere-system --create-namespace ks-core oci://docker.mystack.dpdns.org/mingys/ks-core --version 1.1.5-fix.1 --debug --wait \
---set apiserver.image.repository=mingys/ks-apiserver \
---set console.image.repository=mingys/ks-console \
---set controller.image.repository=mingys/ks-controller-manager \
---set controller.image.tag=v4.1.3-token-fix \
---set telemetry.enabled=false \
---set ksExtensionRepository.image.repository=mingys/ks-extensions-museum \
---set ksExtensionRepository.image.tag=v1.1.6
+helm upgrade --install -n kubesphere-system --create-namespace ks-core oci://docker.mystack.dpdns.org/mingys/ks-core --version 1.1.6 --debug --wait \
+  --set global.imageRegistry=docker.mystack.dpdns.org \
+  --set global.tag=v4.1.4 \
+  --set apiserver.image.repository=mingys/ks-apiserver \
+  --set console.image.repository=mingys/ks-console \
+  --set controller.image.repository=mingys/ks-controller-manager \
+  --set helmExecutor.image.repository=mingys/ks-helm-executor \
+  --set helmExecutor.image.tag=v3.22.0-kubectl-v1.33.4 \
+  --set kubectl.image.repository=mingys/ks-helm-executor \
+  --set kubectl.image.tag=v3.22.0-kubectl-v1.33.4 \
+  --set nodeShell.image.repository=mingys/ks-helm-executor \
+  --set nodeShell.image.tag=v3.22.0-kubectl-v1.33.4 \
+  --set ksCRDs.kubectl.image.repository=mingys/ks-helm-executor \
+  --set ksCRDs.kubectl.image.tag=v3.22.0-kubectl-v1.33.4 \
+  --set telemetry.enabled=false \
+  --set ksExtensionRepository.image.repository=openksc/ks-extensions-museum \
+  --set ksExtensionRepository.image.tag=v1.1.6
 ```
 
 ### 在托管 Kubernetes 上部署 KubeSphere

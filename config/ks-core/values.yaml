@@ -325,7 +325,7 @@ nodeShell:
 # KubeSphere Cloud uses this information to help improve the product and does not share it with third-parties.
 # If you prefer not to share this data, you can keep this setting disabled.
 telemetry:
-  enabled: true
+  enabled: false
 
 extension:
   imageRegistry: ""
