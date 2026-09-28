@@ -19,34 +19,40 @@
 - 立即同步保持异步；OCI 全量校验只对 OCI 仓库展示。
 - 本期不新增后端同步接口、CRD 字段、WebSocket、SSE 或 Redis；版本自动刷新通过现有版本查询缓存失效完成。
 
-### Task 1: 建立前端功能分支并确认基线
+## 优先级
+
+- **P0（本轮必须完成）**：保留核心入口和现有同步语义；收敛标题、帮助提示、工具栏和列表默认层级；确保添加、刷新、行菜单和异步同步不回归。
+- **P1（P0 后完成）**：详情诊断入口、同步统计展示、响应式布局和可访问性回归。
+- **P2（后续优化）**：同步完成后，部署选择页自动刷新应用版本列表；不新增后端同步机制。
+
+### Task 1（P0）: 建立前端功能分支并确认基线
 
 **Files:**
 - Modify: none
 - Test: existing Console repository page and current TypeScript/lint commands
 
-- [ ] 从 `release-4.1.5` 创建 `feature/application-repository-ui`。
+- [x] 从 `release-4.1.5` 创建 `feature/application-repository-ui`。
 - [ ] 在浏览器确认应用仓库列表、详情、添加表单和行菜单当前行为。
 - [ ] 记录基线截图到 `output/playwright/`，覆盖桌面 1280px 和小屏视口。
 - [ ] 运行现有 Console 相关 lint/type/test 命令，确认基线问题与本次变更区分开。
-- [ ] 对照设计文档复核后端 Repo 列表、详情、Events、手动同步和全量校验 API；确认本期不需要后端改动。
+- [x] 对照设计文档复核后端 Repo 列表、详情、Events、手动同步和全量校验 API；确认本期不需要后端改动。
 
-### Task 2: 收敛仓库列表页面层级
+### Task 2（P0）: 收敛仓库列表页面层级
 
 **Files:**
 - Modify: `console/packages/console/src/pages/workspaces/containers/Repos/index.tsx` 或其实际复用的 shared RepoManage 页面
 - Modify: related repository page styles/components discovered during Task 1
 - Test: repository page component tests
 
-- [ ] 先添加列表结构测试，确认标题、搜索、刷新、添加和列表仍存在。
-- [ ] 将帮助内容改为可折叠单行提示，避免默认占据大块首屏空间。
-- [ ] 保留添加为页面唯一主按钮，刷新保留为工具栏操作。
-- [ ] 将设置和批量低频入口收纳，不删除功能。
-- [ ] 将列表行压缩为名称、状态摘要、URL、类型和更多菜单。
-- [ ] 为 URL、状态摘要和长错误文本添加安全换行/截断策略。
-- [ ] 运行组件测试和格式化检查。
+- [x] 先添加列表动作可见性测试，确认核心行菜单入口不回归。
+- [x] 将帮助内容改为可折叠单行提示，避免默认占据大块首屏空间。
+- [x] 保留添加为页面唯一主按钮，刷新保留为工具栏操作。
+- [x] 将设置和批量低频入口收纳，不删除功能。
+- [x] 将列表行压缩为名称、状态摘要、URL、类型和更多菜单。
+- [x] 为 URL、状态摘要和长错误文本添加安全换行/截断策略。
+- [x] 运行组件测试、ESLint 和格式化检查。
 
-### Task 3: 统一行菜单与详情入口
+### Task 3（P1）: 统一行菜单与详情入口
 
 **Files:**
 - Modify: `console/packages/console/src/pages/workspaces/containers/Repos/RepoDetail/index.tsx`
@@ -61,7 +67,7 @@
 - [ ] 不新增后端同步接口；应用版本自动刷新只在同步终态后使现有版本查询失效并重新请求。
 - [ ] 运行相关测试和 TypeScript 检查。
 
-### Task 4: 响应式和可访问性回归
+### Task 4（P1）: 响应式和可访问性回归
 
 **Files:**
 - Modify: repository page styles and shared action components
@@ -73,7 +79,18 @@
 - [ ] 检查加载、成功、失败状态有文本反馈，不能只依赖颜色。
 - [ ] 运行 Impeccable detector 和 Console lint/type/test。
 
-### Task 5: 测试环境验证与交付
+### Task 5（P2）: 同步完成后的应用版本列表刷新
+
+**Files:**
+- Modify: existing application version query/cache consumer identified from the deployment page
+- Test: application version query invalidation/refresh test
+
+- [ ] 先确认部署选择页使用的版本查询 key 和仓库状态来源。
+- [ ] 添加测试：关联 Repo 从同步中进入成功/失败终态后，版本查询被重新获取。
+- [ ] 只失效受影响应用/Repo 的查询，不触发全局刷新。
+- [ ] 确保 HTTPS 和 OCI 使用同一刷新机制，OCI 全量校验不重复触发额外请求。
+
+### Task 6（P1）: 测试环境验证与交付
 
 **Files:**
 - Modify: `kubesphere/docs/PLAN.md` after acceptance
