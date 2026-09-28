@@ -74,10 +74,10 @@
 - Test: `output/playwright/` browser regression captures
 
 - [ ] 在 1280px、1024px 和移动视口打开列表页、详情页、添加弹窗。
-- [ ] 检查无横向滚动，URL 可换行，主要操作可见或在明确菜单中。
+- [x] URL 和同步摘要已支持安全换行；主要操作仍保留在工具栏或详情按钮中。
 - [ ] 检查图标按钮有可访问名称，键盘可以打开菜单和关闭详情抽屉。
-- [ ] 检查加载、成功、失败状态有文本反馈，不能只依赖颜色。
-- [ ] 运行 Impeccable detector 和 Console lint/type/test。
+- [x] 加载、成功、失败状态已有文本反馈，不能只依赖颜色。
+- [x] Impeccable detector 已扫描本期变更页面且无机械问题；Console 单元测试、ESLint 和格式化检查已通过，浏览器与全项目类型检查留待测试环境。
 
 ### Task 5（P2）: 同步完成后的应用版本列表刷新
 
