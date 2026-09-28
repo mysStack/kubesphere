@@ -94,13 +94,43 @@ KubeSphere v4.3 的首页采用任务入口和单一内容面的方式，能够�
 
 ### 后端
 
-本期不改后端。现有 API 已提供：
+本期原则上不改后端。已复核当前 API、Repo Controller 和 CRD 状态字段，现有能力已经覆盖本次 UI 收敛：
 
 - Repo 列表与详情。
 - Events 查询。
 - 异步手动同步。
 - OCI 全量校验模式。
 - 同步统计和脱敏错误。
+
+后端行为边界如下：
+
+| 能力 | 当前实现 | UI 使用方式 |
+| --- | --- | --- |
+| 列表/详情 | `GET /workspaces/{workspace}/repos`、`GET /repos/{repo}` | 列表摘要和详情概览 |
+| 手动同步 | `POST /repos/{repo}/action`，默认增量模式 | 行菜单触发，立即返回，前端轮询状态 |
+| OCI 全量校验 | `POST /repos/{repo}/action?mode=full`，HTTPS 返回 400 | 仅 OCI 详情显示，二次确认后触发 |
+| 定时同步 | Controller 根据 `spec.syncPeriod` 调度 | 不在 UI 侧复制定时逻辑 |
+| 状态与统计 | `status.state`、`status.lastUpdateTime`、`status.sync` | 列表显示摘要，详情显示完整统计 |
+| 事件 | `GET /repos/{repo}/events` | 详情诊断页展示 |
+| 凭据 | Repo 仅保存 `credentialSecretRef`；列表/详情不返回内联密码 | 只展示“已配置/未配置”，不展示 Secret 内容 |
+
+### 后端评估结论
+
+1. 本期不需要新增“自动刷新版本”后端接口。同步完成后，Console 使现有应用版本查询失效并重新请求即可；版本数据仍由现有 `GET /apps/{app}/versions` 提供。
+2. 本期不需要 WebSocket、SSE、任务表或 Redis。仓库列表已有状态轮询，手动同步已经是异步触发器模型。
+3. 不把“仓库列表刷新”和“应用版本列表刷新”混为同一个动作：前者观察 Repo 状态，后者在状态进入终态后刷新部署选择页的版本查询缓存。
+4. `status.sync.completedAt` 与 `status.sync.lastError` 足以支持详情页诊断；不能把 `status.lastUpdateTime` 单独当作“最近成功时间”，因为失败同步也会更新它。
+5. `credentialSecretRef` 可以支持当前凭据展示；历史内联凭据由于出于安全原因不回传，UI 应显示为“已配置”或不展示摘要，不尝试读取 Secret 内容。
+
+### 可选后续后端增强
+
+以下不是本次 UI 收敛的前置条件，只有在实际验收发现需要时再单独立项：
+
+- 增加只读的 `credentialConfigured` 派生字段，统一处理历史内联凭据和 Secret 引用的展示状态。
+- 增加同步触发 ID/开始时间的专用字段，替代前端仅依赖 `status.state` 的轮询判断。
+- 为应用版本查询增加按 Repo 的服务端过滤或变更版本摘要，减少部署页无关查询。
+
+这些增强会影响 API/CRD 兼容性，不能随 UI 调整顺手加入。
 
 ## 响应式与可访问性
 
@@ -119,4 +149,3 @@ KubeSphere v4.3 的首页采用任务入口和单一内容面的方式，能够�
 - 详情能展示现有同步诊断数据和 Events，且不泄露凭据。
 - 1280px、1024px 和移动视口下无横向滚动，主要操作可见或可通过明确菜单访问。
 - 现有仓库页面相关 TypeScript、格式化、组件测试和 Playwright 回归通过。
-
