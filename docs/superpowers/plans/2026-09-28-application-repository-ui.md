@@ -85,10 +85,10 @@
 - Modify: existing application version query/cache consumer identified from the deployment page
 - Test: application version query invalidation/refresh test
 
-- [ ] 先确认部署选择页使用的版本查询 key 和仓库状态来源。
-- [ ] 添加测试：关联 Repo 从同步中进入成功/失败终态后，版本查询被重新获取。
-- [ ] 只失效受影响应用/Repo 的查询，不触发全局刷新。
-- [ ] 确保 HTTPS 和 OCI 使用同一刷新机制，OCI 全量校验不重复触发额外请求。
+- [x] 确认部署选择页 `AppVersionSelector` 使用 `useAppVersionList`，应用通过 `application.kubesphere.io/repo-name` 关联仓库。
+- [x] 添加测试：仓库从同步中进入成功终态后，仅匹配仓库的版本选择器重新获取版本。
+- [x] 通过浏览器自定义事件携带仓库名，只刷新受影响应用，不触发全局查询失效。
+- [x] HTTPS 和 OCI 使用同一刷新机制；失败终态不刷新，OCI 全量校验成功后同样触发一次刷新。
 
 ### Task 6（P1）: 测试环境验证与交付
 
