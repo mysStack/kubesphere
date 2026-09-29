@@ -171,10 +171,11 @@ v4.1.4（已发布稳定版本）
 
 阶段三 UI 收尾验收记录（2026-09-29）：
 
-- Console 分支 `feature/application-repository-ui` commit `f819b89d9`，修复凭据卡片移动端溢出并补齐图标按钮可访问名称；前一 UI 提交为 `b3330e797`。
-- Console Action [Build Personal Console Image #36509277643](https://github.com/mysStack/console/actions/runs/36509277643) 成功，镜像为 `docker.mystack.dpdns.org/mingys/ks-console:application-repository-ui-20260929-f819b89`。
+- Console 分支 `feature/application-repository-ui` 已包含凭据卡片移动端溢出修复、图标按钮可访问名称和同步轮询收敛；最新提交为 `26a84881d`。
+- Console Action [Build Personal Console Image #36527810840](https://github.com/mysStack/console/actions/runs/36527810840) 成功，镜像为 `docker.mystack.dpdns.org/mingys/ks-console:application-repository-ui-20260929-26a8488`。
 - 测试环境 `192.168.2.131` 的 `ks-console` 已滚动更新，Pod `1/1 Running`，Deployment `ready=1 available=1`。
-- Playwright 已验证 1280px、1024px、375px 仓库列表，添加仓库弹窗、凭据下拉、详情诊断、HTTPS/OCI 行菜单差异和立即同步状态收敛；在部署选择页派发仓库同步完成事件后，版本接口请求计数由 3 增加到 4，确认只刷新匹配仓库的版本列表。
+- Playwright 已验证 1280px、1024px 仓库列表、添加仓库弹窗、凭据下拉、详情诊断、HTTPS/OCI 行菜单差异和立即同步状态收敛；375px 下添加弹窗凭据区不溢出。KubeSphere 全局壳在 375px 仍保持 1164px 最小宽度，属于平台级响应式限制，本期不在仓库页面局部覆盖。
+- 列表同步轮询使用 DataTable 查询自身的 `refetchInterval`：进入同步状态后每 3 秒刷新，成功或失败终态后自动停止；首次打开页面已在同步中的仓库也会加入轮询集合。同步触发后不再额外发起重复列表请求。
 - 已知环境噪声：测试环境扩展 `kubeeye`、`ingress-utils`、`whizard-telemetry`、`frontend-forge` 的兼容性错误与本次应用仓库页面无关；未发现仓库页面自身运行时错误。
 
 ## 阶段四：Kubernetes Gateway API 基础接入

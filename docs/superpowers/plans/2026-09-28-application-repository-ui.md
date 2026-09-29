@@ -73,7 +73,7 @@
 - Modify: repository page styles and shared action components
 - Test: `output/playwright/` browser regression captures
 
-- [x] 在 1280px、1024px 和移动视口打开列表页、详情页、添加弹窗。
+- [x] 在 1280px、1024px 打开列表页、详情页和添加弹窗；在移动视口验证添加弹窗凭据区不溢出。全局壳的 1164px 最小宽度属于平台级限制，本期不在仓库页面局部覆盖。
 - [x] URL 和同步摘要已支持安全换行；主要操作仍保留在工具栏或详情按钮中。
 - [x] 检查图标按钮有可访问名称，键盘可以关闭添加弹窗；列表菜单通过可访问按钮名称可操作。
 - [x] 加载、成功、失败状态已有文本反馈，不能只依赖颜色。
