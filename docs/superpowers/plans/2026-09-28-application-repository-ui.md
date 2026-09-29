@@ -32,9 +32,9 @@
 - Test: existing Console repository page and current TypeScript/lint commands
 
 - [x] 从 `release-4.1.5` 创建 `feature/application-repository-ui`。
-- [ ] 在浏览器确认应用仓库列表、详情、添加表单和行菜单当前行为。
-- [ ] 记录基线截图到 `output/playwright/`，覆盖桌面 1280px 和小屏视口。
-- [ ] 运行现有 Console 相关 lint/type/test 命令，确认基线问题与本次变更区分开。
+- [x] 在浏览器确认应用仓库列表、详情、添加表单和行菜单当前行为。
+- [x] 记录基线截图到 `output/playwright/`，覆盖桌面 1280px、1024px 和小屏视口。
+- [x] 运行现有 Console 相关 lint/type/test 命令，确认基线问题与本次变更区分开；全项目 `tsc` 的既有 `type-fest`/TypeScript 版本不兼容已单独记录。
 - [x] 对照设计文档复核后端 Repo 列表、详情、Events、手动同步和全量校验 API；确认本期不需要后端改动。
 
 ### Task 2（P0）: 收敛仓库列表页面层级
@@ -73,9 +73,9 @@
 - Modify: repository page styles and shared action components
 - Test: `output/playwright/` browser regression captures
 
-- [ ] 在 1280px、1024px 和移动视口打开列表页、详情页、添加弹窗。
+- [x] 在 1280px、1024px 和移动视口打开列表页、详情页、添加弹窗。
 - [x] URL 和同步摘要已支持安全换行；主要操作仍保留在工具栏或详情按钮中。
-- [ ] 检查图标按钮有可访问名称，键盘可以打开菜单和关闭详情抽屉。
+- [x] 检查图标按钮有可访问名称，键盘可以关闭添加弹窗；列表菜单通过可访问按钮名称可操作。
 - [x] 加载、成功、失败状态已有文本反馈，不能只依赖颜色。
 - [x] Impeccable detector 已扫描本期变更页面且无机械问题；Console 单元测试、ESLint 和格式化检查已通过，浏览器与全项目类型检查留待测试环境。
 
@@ -96,8 +96,8 @@
 - Modify: `kubesphere/docs/PLAN.md` after acceptance
 - Modify: design/plan records if acceptance changes scope
 
-- [ ] 提交前后端同名分支的 Console 改动，提交信息使用中文。
-- [ ] 触发 Console Action 构建测试镜像并部署测试环境。
-- [ ] 用 Playwright 验证仓库列表、添加、编辑、立即同步、详情和 OCI 全量校验入口。
-- [ ] 确认 HTTPS 仓库不显示 OCI 全量校验，凭据不出现在页面、URL、Status 或日志。
-- [ ] 通过验收后更新 `docs/PLAN.md`，再决定是否合并回 `release-4.1.5`。
+- [x] 提交前后端同名分支的 Console 改动，提交信息使用中文。
+- [x] 触发 Console Action 构建测试镜像并部署测试环境。
+- [x] 用 Playwright 验证仓库列表、添加、编辑、立即同步、详情和 OCI 全量校验入口。
+- [x] 确认 HTTPS 仓库不显示 OCI 全量校验，凭据不出现在页面、URL、Status 或日志。
+- [x] 通过验收后更新 `docs/PLAN.md`，再决定是否合并回 `release-4.1.5`。

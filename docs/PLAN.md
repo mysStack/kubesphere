@@ -151,7 +151,7 @@ v4.1.4（已发布稳定版本）
 - [x] Console 显示开始时间、最近成功时间、耗时、版本统计、缓存统计和失败原因；不伪造百分比进度。
 - [x] 定时 Job 和“立即同步”复用同一个后台同步入口，不复制同步逻辑。
 - [x] 支持增量同步、OCI 全量校验、保存前连接验证三种明确动作；默认动作在 UI 中清晰标注。
-- [ ] 商店版本列表在同步完成后自动刷新，不要求用户重新进入页面。
+- [x] 商店版本列表在同步完成后自动刷新，不要求用户重新进入页面。
 - [x] 增加仓库诊断入口，显示最近同步统计、错误和 Kubernetes Events，但不暴露密码或 Token。
 
 验收标准：用户点击立即同步后页面不超时；状态最终可收敛到成功或失败；新版本能刷新到应用部署选择列表；错误不再只显示“同步中”。
@@ -167,7 +167,15 @@ v4.1.4（已发布稳定版本）
 - Repo 详情新增同步诊断页，展示生命周期时间、耗时、版本/Artifact、请求/缓存命中和已脱敏错误；列表增加 `Stale` 展示，按同步周期计算且不修改 CRD 状态。
 - 失败仓库会按配置的同步周期再次尝试；不会因一次 401/网络错误在 Status 更新后立即进入持续重试循环。
 - 测试环境回归：`redis-cluster`（137 个有效版本）、`traefik-oci`、带 `wen-route-app` Secret 引用的私有 OCI `backend-app` 均收敛到 `successful`；未配置凭据时的 401 会收敛到 `failed` 并展示脱敏错误。
-- 仍保留“商店版本列表同步完成后自动刷新”作为后续项：当前列表页只轮询仓库状态，应用部署选择页在下一次查询时读取最新版本，避免引入跨页面实时推送或任务系统。
+- 商店版本列表自动刷新已完成：仓库列表/详情在同步从进行中进入成功或失败终态时派发带 `repoName` 的浏览器事件；部署选择页仅当应用标签关联该仓库时刷新版本查询，不触发全局失效，也不引入任务系统。
+
+阶段三 UI 收尾验收记录（2026-09-29）：
+
+- Console 分支 `feature/application-repository-ui` commit `f819b89d9`，修复凭据卡片移动端溢出并补齐图标按钮可访问名称；前一 UI 提交为 `b3330e797`。
+- Console Action [Build Personal Console Image #36509277643](https://github.com/mysStack/console/actions/runs/36509277643) 成功，镜像为 `docker.mystack.dpdns.org/mingys/ks-console:application-repository-ui-20260929-f819b89`。
+- 测试环境 `192.168.2.131` 的 `ks-console` 已滚动更新，Pod `1/1 Running`，Deployment `ready=1 available=1`。
+- Playwright 已验证 1280px、1024px、375px 仓库列表，添加仓库弹窗、凭据下拉、详情诊断、HTTPS/OCI 行菜单差异和立即同步状态收敛；在部署选择页派发仓库同步完成事件后，版本接口请求计数由 3 增加到 4，确认只刷新匹配仓库的版本列表。
+- 已知环境噪声：测试环境扩展 `kubeeye`、`ingress-utils`、`whizard-telemetry`、`frontend-forge` 的兼容性错误与本次应用仓库页面无关；未发现仓库页面自身运行时错误。
 
 ## 阶段四：Kubernetes Gateway API 基础接入
 
