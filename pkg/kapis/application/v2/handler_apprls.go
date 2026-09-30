@@ -88,10 +88,7 @@ func (h *appHandler) CreateOrUpdateAppRls(req *restful.Request, resp *restful.Re
 			apprls.Labels = map[string]string{}
 		}
 		apprls.Labels[appv2.AppVersionIDLabelKey] = createRlsRequest.Spec.AppVersionID
-		if apprls.Annotations == nil {
-			apprls.Annotations = map[string]string{}
-		}
-		apprls.Annotations[constants.CreatorAnnotationKey] = creator
+		applyAppReleaseAuditAnnotations(copyRls, &apprls, creator)
 		return nil
 	}
 	_, err = controllerutil.CreateOrUpdate(req.Request.Context(), h.client, &apprls, mutateFn)
@@ -100,6 +97,40 @@ func (h *appHandler) CreateOrUpdateAppRls(req *restful.Request, resp *restful.Re
 	}
 
 	resp.WriteEntity(errors.None)
+}
+
+// applyAppReleaseAuditAnnotations applies user-owned audit annotations while
+// keeping the creator immutable and preventing controller status updates from
+// changing the last user who updated the desired state.
+func applyAppReleaseAuditAnnotations(current, requested *appv2.ApplicationRelease, username string) {
+	annotations := requested.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+
+	if current.GetResourceVersion() == "" {
+		if username != "" {
+			annotations[constants.CreatorAnnotationKey] = username
+		} else {
+			delete(annotations, constants.CreatorAnnotationKey)
+		}
+		delete(annotations, constants.LastUpdaterAnnotationKey)
+	} else {
+		if creator := current.GetAnnotations()[constants.CreatorAnnotationKey]; creator != "" {
+			annotations[constants.CreatorAnnotationKey] = creator
+		} else {
+			delete(annotations, constants.CreatorAnnotationKey)
+		}
+		if username != "" {
+			annotations[constants.LastUpdaterAnnotationKey] = username
+		} else if updater := current.GetAnnotations()[constants.LastUpdaterAnnotationKey]; updater != "" {
+			annotations[constants.LastUpdaterAnnotationKey] = updater
+		} else {
+			delete(annotations, constants.LastUpdaterAnnotationKey)
+		}
+	}
+
+	requested.SetAnnotations(annotations)
 }
 
 func (h *appHandler) DescribeAppRls(req *restful.Request, resp *restful.Response) {

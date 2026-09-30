@@ -162,8 +162,7 @@ func (r *AppReleaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		logger.Error(err, "cluster not found or deleting", "cluster", apprls.GetRlsCluster())
 		apprls.Status.State = appv2.StatusClusterDeleted
 		apprls.Status.Message = fmt.Sprintf("cluster %s has been deleted", cluster.Name)
-		patch, _ := json.Marshal(apprls)
-		err = r.Status().Patch(ctx, apprls, client.RawPatch(client.Merge.Type(), patch))
+		err = r.patchStatus(ctx, apprls)
 		if err != nil {
 			logger.Error(err, "failed to update application release")
 			return ctrl.Result{}, err
@@ -268,9 +267,7 @@ func (r *AppReleaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 					return ctrl.Result{}, err
 				}
 
-				apprls.Annotations[appv2.TimeoutRecheck] = strconv.Itoa(reCheck + 1)
-				patch, _ := json.Marshal(apprls)
-				err = r.Patch(ctx, apprls, client.RawPatch(client.Merge.Type(), patch))
+				err = r.patchAnnotation(ctx, apprls, appv2.TimeoutRecheck, strconv.Itoa(reCheck+1))
 				if err != nil {
 					logger.Error(err, "failed to update application release")
 					return ctrl.Result{}, err
@@ -363,8 +360,7 @@ func (r *AppReleaseReconciler) removeAll(ctx context.Context, apprls *appv2.Appl
 		logger.V(4).Info("try to update application release uninstall job", "job", uninstallJobName)
 		apprls.Status.UninstallJobName = uninstallJobName
 		apprls.Status.LastUpdate = metav1.Now()
-		patch, _ := json.Marshal(apprls)
-		err = r.Status().Patch(ctx, apprls, client.RawPatch(client.Merge.Type(), patch))
+		err = r.patchStatus(ctx, apprls)
 		if err != nil {
 			logger.Error(err, "failed to update application release")
 			return ctrl.Result{}, err
@@ -414,6 +410,27 @@ func (r *AppReleaseReconciler) updateStatus(ctx context.Context, apprls *appv2.A
 		apprls.Status.Message = message[0]
 	}
 	apprls.Status.LastUpdate = metav1.Now()
-	patch, _ := json.Marshal(apprls)
+	return r.patchStatus(ctx, apprls)
+}
+
+func (r *AppReleaseReconciler) patchStatus(ctx context.Context, apprls *appv2.ApplicationRelease) error {
+	patch, err := json.Marshal(struct {
+		Status appv2.ApplicationReleaseStatus `json:"status"`
+	}{Status: apprls.Status})
+	if err != nil {
+		return err
+	}
 	return r.Status().Patch(ctx, apprls, client.RawPatch(client.Merge.Type(), patch))
+}
+
+func (r *AppReleaseReconciler) patchAnnotation(ctx context.Context, apprls *appv2.ApplicationRelease, key, value string) error {
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]string{key: value},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return r.Patch(ctx, apprls, client.RawPatch(client.Merge.Type(), patch))
 }

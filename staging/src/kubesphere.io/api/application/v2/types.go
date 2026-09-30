@@ -135,6 +135,10 @@ func (in *ApplicationRelease) GetCreator() string {
 	return getValue(in.Annotations, constants.CreatorAnnotationKey)
 }
 
+func (in *ApplicationRelease) GetLastUpdater() string {
+	return getValue(in.Annotations, constants.LastUpdaterAnnotationKey)
+}
+
 func (in *ApplicationRelease) GetRlsCluster() string {
 	name := getValue(in.Labels, constants.ClusterNameLabelKey)
 	if name != "" {

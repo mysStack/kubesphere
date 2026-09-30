@@ -178,6 +178,56 @@ v4.1.4（已发布稳定版本）
 - 列表同步轮询使用 DataTable 查询自身的 `refetchInterval`：进入同步状态后每 3 秒刷新，成功或失败终态后自动停止；首次打开页面已在同步中的仓库也会加入轮询集合。同步触发后不再额外发起重复列表请求。
 - 已知环境噪声：测试环境扩展 `kubeeye`、`ingress-utils`、`whizard-telemetry`、`frontend-forge` 的兼容性错误与本次应用仓库页面无关；未发现仓库页面自身运行时错误。
 
+## 阶段三后续：应用配置引用与变更审计
+
+目标：降低应用创建时逐条填写环境变量的成本，并让应用详情能够区分创建人和最后一次用户更新人。
+
+### 子项目 A：ConfigMap/Secret 批量引用
+
+优先支持标准工作负载创建流程，不把任意 Helm Chart 的 values 结构假定为统一格式。
+
+- [ ] P0：在容器环境变量配置中增加整份 ConfigMap/Secret 引用，生成 Kubernetes 原生 `envFrom.configMapRef` 和 `envFrom.secretRef`。
+- [ ] P0：保留现有逐 Key 引用能力，支持同一容器同时使用 `env` 和 `envFrom`。
+- [ ] P0：引用选择器只展示当前 Cluster/Project 可见资源；Secret 仅展示名称和 Key 元数据，不读取或回显 Secret 值。
+- [ ] P1：增加 ConfigMap/Secret 文件挂载，生成 `volumes[].configMap`、`volumes[].secret` 和 `volumeMounts[]`；校验挂载路径冲突、只读属性和资源作用域。
+- [ ] P1：Helm 应用仅在 Chart 的 values schema 明确暴露 `envFrom`、`extraEnvFrom`、`volumes` 或 `volumeMounts` 等入口时提供结构化控件；其他 Chart 继续使用 Values/YAML 编辑器。
+- [ ] P2：增加可选环境变量前缀、Key 过滤、批量移除和引用冲突提示。
+
+#### 第二期：配置变更后的生效提示与受影响工作负载重启
+
+`env`、`envFrom.configMapRef` 和 `envFrom.secretRef` 都在 Pod 创建时注入环境变量。修改 ConfigMap 或 Secret 不会更新已运行 Pod；此能力只覆盖标准工作负载，不改变 Helm Chart 自身的更新策略。
+
+- [ ] P2：ConfigMap/Secret 保存成功后明确提示：以环境变量方式引用的工作负载需要重新部署后才会读取新值，并提供进入当前项目工作负载列表的入口。
+- [ ] P2：调研并设计 ConfigMap/Secret 到 Deployment、StatefulSet、DaemonSet、CronJob 等 Pod Template 的反向引用查询范围，覆盖 `env.valueFrom` 与 `envFrom`；不读取、返回或展示 Secret 内容。
+- [ ] P2：在确认弹窗中展示受影响工作负载，并允许用户显式勾选后批量触发已有的 `workload.redeploy` 滚动更新；默认不自动重启，避免一次配置修改意外中断多个业务。
+- [ ] P2：定义无引用、无重启权限、部分工作负载重启失败、资源在查询后被删除等状态的交互和审计展示，再进入实现。
+
+第二期目前仅登记需求，后续基于实际工作负载类型、权限模型和批量操作体验完成技术设计后再开发。
+
+验收标准：标准工作负载可以一次引用完整 ConfigMap/Secret 并成功创建、更新和回显；Secret 内容不出现在页面、请求日志、事件或错误信息中；Helm 应用不会因通用控件写入未知 values 路径而产生“界面显示成功但 Chart 未生效”的假象。
+
+### 子项目 B：应用创建人和更新人
+
+- [ ] P0：ApplicationRelease 创建时写入 `kubesphere.io/creator`，更新时保持创建人不变。
+- [ ] P0：ApplicationRelease 由用户 API 更新时写入独立的 `kubesphere.io/last-updater`；Controller 的状态更新不得覆盖该字段。
+- [ ] P0：保持 Controller 使用 `kubesphere.io/creator` 做 Helm/Kubernetes impersonation，不能用更新人替代创建人。
+- [ ] P1：应用详情展示创建人、更新人、创建时间和更新时间；列表暂不增加更新人列，避免表格信息过密。
+- [ ] P1：为创建、更新、Controller 状态更新和历史对象缺少注解等场景增加后端和 Console 回归测试。
+- [ ] P2：评估是否需要操作历史时间线；不把 `managedFields` 直接作为产品层更新人字段。
+
+验收标准：用户更新应用后创建人保持不变，更新人显示为最近一次用户 API 操作人；Controller 重试、同步状态变化和 Helm 执行不会改变更新人；旧应用无更新人时页面兼容显示为空或“暂无记录”。
+
+### 合并开发评估
+
+这两个子项目可以纳入同一个迭代和发布线，但不建议合并成一个实现分支或一个大 PR：
+
+1. 子项目 A 涉及工作负载 API、前端表单和 Helm values 兼容边界，回归重点是创建/更新后的 Pod spec 与文件挂载。
+2. 子项目 B 涉及 ApplicationRelease API、Controller 身份代理和详情展示，回归重点是审计字段不可覆盖和权限身份不回归。
+3. 两者没有运行时依赖，任一项失败都可以独立回滚；推荐分别使用 `feature/app-config-reference` 和 `feature/app-release-audit`，完成各自测试后合并到当前 `release-4.1.5`。
+4. 若希望减少发布次数，可以在同一版本中连续合并两个已验证分支，但不能因为共用应用页面就共用未验证的半成品代码。
+
+建议实施顺序：先完成子项目 B 的 creator/updater 数据语义修复，再完成子项目 A 的 `envFrom`，最后评估文件挂载和 Helm Chart schema 适配。两项均不需要引入 Redis。
+
 ## 阶段四：Kubernetes Gateway API 基础接入
 
 目标：引入标准 Kubernetes Gateway API，与现有 Ingress 和旧版 KubeSphere Gateway 并存。
