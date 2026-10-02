@@ -189,20 +189,24 @@ v4.1.4（已发布稳定版本）
 - [ ] P0：在容器环境变量配置中增加整份 ConfigMap/Secret 引用，生成 Kubernetes 原生 `envFrom.configMapRef` 和 `envFrom.secretRef`。
 - [ ] P0：保留现有逐 Key 引用能力，支持同一容器同时使用 `env` 和 `envFrom`。
 - [ ] P0：引用选择器只展示当前 Cluster/Project 可见资源；Secret 仅展示名称和 Key 元数据，不读取或回显 Secret 值。
+- [ ] P0：前端将“环境变量”作为统一配置区域，在其下并列展示“单项环境变量（`env`）”和“整体配置引用（`envFrom`）”；不得用精简表单替换现有工作负载字段和能力。
+- [ ] P0：保存 ConfigMap/Secret 后异步查询当前项目受影响的工作负载，覆盖 `env.valueFrom` 与 `envFrom`，并允许用户显式选择需要滚动重启的资源。
+- [ ] P0：受影响资源至少覆盖 Deployment、StatefulSet、DaemonSet；CronJob 作为引用查询对象纳入结果展示，但不在本期改造 CronJob 创建表单。
+- [ ] P0：重启操作复用已有工作负载滚动更新能力，异步执行并逐项展示成功、失败、无权限、更新中和资源不存在状态；默认只保存，不自动重启。
 - [ ] P1：增加 ConfigMap/Secret 文件挂载，生成 `volumes[].configMap`、`volumes[].secret` 和 `volumeMounts[]`；校验挂载路径冲突、只读属性和资源作用域。
 - [ ] P1：Helm 应用仅在 Chart 的 values schema 明确暴露 `envFrom`、`extraEnvFrom`、`volumes` 或 `volumeMounts` 等入口时提供结构化控件；其他 Chart 继续使用 Values/YAML 编辑器。
 - [ ] P2：增加可选环境变量前缀、Key 过滤、批量移除和引用冲突提示。
 
-#### 第二期：配置变更后的生效提示与受影响工作负载重启
+#### 配置变更后的生效提示与受影响工作负载重启
 
 `env`、`envFrom.configMapRef` 和 `envFrom.secretRef` 都在 Pod 创建时注入环境变量。修改 ConfigMap 或 Secret 不会更新已运行 Pod；此能力只覆盖标准工作负载，不改变 Helm Chart 自身的更新策略。
 
-- [ ] P2：ConfigMap/Secret 保存成功后明确提示：以环境变量方式引用的工作负载需要重新部署后才会读取新值，并提供进入当前项目工作负载列表的入口。
-- [ ] P2：调研并设计 ConfigMap/Secret 到 Deployment、StatefulSet、DaemonSet、CronJob 等 Pod Template 的反向引用查询范围，覆盖 `env.valueFrom` 与 `envFrom`；不读取、返回或展示 Secret 内容。
-- [ ] P2：在确认弹窗中展示受影响工作负载，并允许用户显式勾选后批量触发已有的 `workload.redeploy` 滚动更新；默认不自动重启，避免一次配置修改意外中断多个业务。
-- [ ] P2：定义无引用、无重启权限、部分工作负载重启失败、资源在查询后被删除等状态的交互和审计展示，再进入实现。
+- [ ] P0：ConfigMap/Secret 保存成功后明确提示：以环境变量方式引用的工作负载需要重新部署后才会读取新值。
+- [ ] P0：查询 ConfigMap/Secret 到 Deployment、StatefulSet、DaemonSet、CronJob 等 Pod Template 的反向引用，覆盖 `env.valueFrom` 与 `envFrom`；不读取、返回或展示 Secret 内容。
+- [ ] P0：在确认弹窗中展示受影响工作负载，默认不执行重启；用户显式勾选后，才批量触发已有的滚动更新能力。
+- [ ] P1：定义无引用、无重启权限、部分工作负载重启失败、资源在查询后被删除、资源已经在更新中等状态的交互和审计展示。
 
-第二期目前仅登记需求，后续基于实际工作负载类型、权限模型和批量操作体验完成技术设计后再开发。
+P1/P2 部分仍需基于实际工作负载类型、权限模型和批量操作体验完成技术设计后再开发；P0 的引用、生效提示、影响查询和用户确认重启属于当前阶段核心验收范围。
 
 验收标准：标准工作负载可以一次引用完整 ConfigMap/Secret 并成功创建、更新和回显；Secret 内容不出现在页面、请求日志、事件或错误信息中；Helm 应用不会因通用控件写入未知 values 路径而产生“界面显示成功但 Chart 未生效”的假象。
 
