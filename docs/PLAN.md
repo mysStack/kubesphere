@@ -184,31 +184,29 @@ v4.1.4（已发布稳定版本）
 
 ### 子项目 A：ConfigMap/Secret 批量引用
 
-优先支持标准工作负载创建流程，不把任意 Helm Chart 的 values 结构假定为统一格式。
+完整 V3 源码不可获得；`packages/bootstrap/assets/v3dist` 是已编译的稳定兼容制品，禁止以精简 Console 原生表单替换或重新构建该制品。当前能力采用 Console 独立配置引用入口和可选 Stakater Reloader 自动滚动更新，不把任意 Helm Chart 的 values 结构假定为统一格式。
 
-- [ ] P0：在容器环境变量配置中增加整份 ConfigMap/Secret 引用，生成 Kubernetes 原生 `envFrom.configMapRef` 和 `envFrom.secretRef`。
+- [ ] P0：在 Deployment、StatefulSet、DaemonSet 详情页提供独立“配置引用”入口，生成并回显 Kubernetes 原生 `envFrom.configMapRef` 和 `envFrom.secretRef`；不接管 V3 创建/编辑路由。
 - [ ] P0：保留现有逐 Key 引用能力，支持同一容器同时使用 `env` 和 `envFrom`。
 - [ ] P0：引用选择器只展示当前 Cluster/Project 可见资源；Secret 仅展示名称和 Key 元数据，不读取或回显 Secret 值。
-- [ ] P0：前端将“环境变量”作为统一配置区域，在其下并列展示“单项环境变量（`env`）”和“整体配置引用（`envFrom`）”；不得用精简表单替换现有工作负载字段和能力。
-- [ ] P0：保存 ConfigMap/Secret 后异步查询当前项目受影响的工作负载，覆盖 `env.valueFrom` 与 `envFrom`，并允许用户显式选择需要滚动重启的资源。
-- [ ] P0：受影响资源至少覆盖 Deployment、StatefulSet、DaemonSet；CronJob 作为引用查询对象纳入结果展示，但不在本期改造 CronJob 创建表单。
-- [ ] P0：重启操作复用已有工作负载滚动更新能力，异步执行并逐项展示成功、失败、无权限、更新中和资源不存在状态；默认只保存，不自动重启。
+- [ ] P0：保留 V3 的完整工作负载字段；独立入口只 PATCH 目标容器的 `envFrom` 和工作负载元数据注解。
+- [ ] P0：按工作负载开启或关闭配置变化自动重启：开启时写入 `reloader.stakater.com/auto: "true"`，关闭时移除该注解。
+- [ ] P0：以独立 Namespace、固定版本镜像和最小 RBAC 部署 Stakater Reloader；它不依赖 `ks-apiserver`、`ks-controller-manager` 或 Console 专用 API。
 - [ ] P1：增加 ConfigMap/Secret 文件挂载，生成 `volumes[].configMap`、`volumes[].secret` 和 `volumeMounts[]`；校验挂载路径冲突、只读属性和资源作用域。
 - [ ] P1：Helm 应用仅在 Chart 的 values schema 明确暴露 `envFrom`、`extraEnvFrom`、`volumes` 或 `volumeMounts` 等入口时提供结构化控件；其他 Chart 继续使用 Values/YAML 编辑器。
 - [ ] P2：增加可选环境变量前缀、Key 过滤、批量移除和引用冲突提示。
 
-#### 配置变更后的生效提示与受影响工作负载重启
+#### 配置变更后的自动生效
 
 `env`、`envFrom.configMapRef` 和 `envFrom.secretRef` 都在 Pod 创建时注入环境变量。修改 ConfigMap 或 Secret 不会更新已运行 Pod；此能力只覆盖标准工作负载，不改变 Helm Chart 自身的更新策略。
 
-- [ ] P0：ConfigMap/Secret 保存成功后明确提示：以环境变量方式引用的工作负载需要重新部署后才会读取新值。
-- [ ] P0：查询 ConfigMap/Secret 到 Deployment、StatefulSet、DaemonSet、CronJob 等 Pod Template 的反向引用，覆盖 `env.valueFrom` 与 `envFrom`；不读取、返回或展示 Secret 内容。
-- [ ] P0：在确认弹窗中展示受影响工作负载，默认不执行重启；用户显式勾选后，才批量触发已有的滚动更新能力。
-- [ ] P1：定义无引用、无重启权限、部分工作负载重启失败、资源在查询后被删除、资源已经在更新中等状态的交互和审计展示。
+- [ ] P0：Console 明确展示自动重启状态；默认关闭，开启后由 Reloader 监听被引用的 ConfigMap/Secret 并异步触发滚动更新，不要求每次配置变更都经过 KubeSphere 确认。
+- [ ] P0：验证 Reloader 对 `envFrom` 引用的 Deployment、StatefulSet、DaemonSet 生效；关闭注解或卸载 Reloader 后，工作负载配置保留且停止自动滚动更新。
+- [ ] P1：为 Reloader 事件和失败原因提供只读诊断入口；不在 Console 重复实现影响分析、重启队列、PodTemplate 重启 PATCH 或批量确认弹窗。
 
-P1/P2 部分仍需基于实际工作负载类型、权限模型和批量操作体验完成技术设计后再开发；P0 的引用、生效提示、影响查询和用户确认重启属于当前阶段核心验收范围。
+已废弃：自研 ConfigMap/Secret 反向引用扫描、用户勾选受影响工作负载、批量重启队列和重启状态轮询。废弃原因：这些职责由独立的 Stakater Reloader Controller 统一处理，避免与 KubeSphere 工作负载页面和 Controller 强耦合。
 
-验收标准：标准工作负载可以一次引用完整 ConfigMap/Secret 并成功创建、更新和回显；Secret 内容不出现在页面、请求日志、事件或错误信息中；Helm 应用不会因通用控件写入未知 values 路径而产生“界面显示成功但 Chart 未生效”的假象。
+验收标准：标准工作负载可通过独立入口引用完整 ConfigMap/Secret 并正确回显；Secret 内容不出现在页面、请求日志、事件或错误信息中；未启用自动重启时配置变化不滚动 Pod，启用后 Reloader 能使引用该资源的标准工作负载滚动更新；完整 V3 页面、字段和路由不受影响；Helm 应用不会因通用控件写入未知 values 路径而产生“界面显示成功但 Chart 未生效”的假象。
 
 ### 子项目 B：应用创建人和更新人
 
