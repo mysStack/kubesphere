@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reloader
+  namespace: kubesphere-reloader
+  labels:
+    app.kubernetes.io/name: reloader
+    app.kubernetes.io/part-of: kubesphere
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: reloader
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: reloader
+        app.kubernetes.io/part-of: kubesphere
+    spec:
+      serviceAccountName: reloader
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: reloader
+          image: ghcr.io/stakater/reloader:v1.4.14
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 9090
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
