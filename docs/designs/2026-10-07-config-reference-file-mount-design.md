@@ -140,6 +140,17 @@ V3 制品内存在卷挂载相关的实现，但源码不可获得，本项目�
 
 ## 已知限制与待决
 
+- **Helm 管理的工作负载上，配置引用不是持久的。** `envFrom`、`volumes` 与 `volumeMounts` 都由
+  本功能直接 PATCH 到工作负载对象上；而 Helm 管理的工作负载（带
+  `app.kubernetes.io/managed-by: Helm` 与 `meta.helm.sh/release-*` 注解）在该 Release 下次升级
+  时，Helm 会按 release 清单做三方合并，把这些 out-of-band 改动回滚。
+  实测环境中的 `dev-wes/wes-v2-server`（release `wes-server`）就属于这一类：它的 3 条
+  `envFrom` 是直接 PATCH 上去的，升级 `wes-server` 后会丢失。
+  这是 Helm 的预期行为，不是本功能的缺陷，但用户无从预期，因此需要让它在界面或文档上可见。
+  后续可评估两条路：在 Helm 管理的工作负载上给出提示；或改为写入 Chart 认可的入口（即 PLAN 196
+  的前置条件成立时提供结构化控件）。
+
+
 - `items`、`defaultMode`、`subPath` 不在本轮范围。若需要「只挂载某一个键」，当前只能用
   envFrom 或逐 Key 的环境变量引用绕开，或等后续增量。
 - 卷与挂载由资源名派生，改名或在另一个容器里换成别的资源时可能新建卷；这是为了避免改到

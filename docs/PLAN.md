@@ -206,6 +206,13 @@ v4.1.4（已发布稳定版本）
 
 已废弃：自研 ConfigMap/Secret 反向引用扫描、用户勾选受影响工作负载、批量重启队列和重启状态轮询。废弃原因：这些职责由独立的 Stakater Reloader Controller 统一处理，避免与 KubeSphere 工作负载页面和 Controller 强耦合。
 
+已知限制（2026-10-07 记录）：本能力把 `envFrom`、`volumes` 与 `volumeMounts` 直接 PATCH 到
+工作负载对象上。对 Helm 管理的工作负载（带 `app.kubernetes.io/managed-by: Helm` 与
+`meta.helm.sh/release-*`），该 Release 下次升级时 Helm 会按 release 清单做三方合并并回滚这些
+改动——实测环境中的 `dev-wes/wes-v2-server`（release `wes-server`）即属此类，它现有的 3 条
+`envFrom` 会在下一次升级 `wes-server` 时丢失。这是 Helm 的预期行为，不是本能力缺陷，但用户无从
+预期；是否在界面提示、或改为写入 Chart 认可的入口（即 P1 的 schema 前置条件），留待评估。
+
 验收标准：标准工作负载可通过独立入口引用完整 ConfigMap/Secret 并正确回显；Secret 内容不出现在页面、请求日志、事件或错误信息中；未启用自动重启时配置变化不滚动 Pod，启用后 Reloader 能使引用该资源的标准工作负载滚动更新；完整 V3 页面、字段和路由不受影响；Helm 应用不会因通用控件写入未知 values 路径而产生“界面显示成功但 Chart 未生效”的假象。
 
 ### 子项目 B：应用创建人和更新人
