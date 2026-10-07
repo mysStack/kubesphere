@@ -138,6 +138,34 @@ V3 制品内存在卷挂载相关的实现，但源码不可获得，本项目�
   资源的标准工作负载滚动更新（含文件挂载路径的独立验证）。
 - 完整 V3 页面、字段与路由不受影响。
 
+## 交互层实现清单
+
+对象层已完成（`ConfigReference/fileMount.ts`，16 个用例）。剩下的是 markup 与接线，涉及**两个
+各自独立实现行 markup 的组件**，两份都要改：
+
+1. `ConfigReferenceInline.tsx`（控制台内编辑器，主路径）
+   - 增加 `fileMounts: FileMountReference[]` 状态，随容器切换重置（与 `references` 一致）；
+   - 新增「文件挂载」分区：每行 = 资源选择器（复用现有 `ConfigMap/Secret` 下拉）+ 挂载路径输入
+     + 只读开关 + 删除；分区底部「添加文件挂载」；
+   - 行内错误：调用 `validateFileMounts`，把返回的 code 映射到
+     `CONFIG_REFERENCE_FILE_MOUNT_*` 文案，显示在对应行下方；
+   - 预览：「将挂载 {count} 个文件」，count 取该资源可见键数；
+   - 保存：把 `fileMounts` 作为第 5 个参数传给 `buildConfigReferencePatch`；错误定位沿用现有的
+     字段级处理（解析响应里的 `volumes[<i>]` / `volumeMounts[<i>]`）。
+2. `ConfigReferencePanel.tsx`（独立路由）：同上，与 Inline 保持一致的交互与文案。
+3. 文案键已就绪：`CONFIG_REFERENCE_FILE_MOUNTS`、`_ADD`、`_PATH`、`_READ_ONLY`、`_PREVIEW`、
+   `_NAME_REQUIRED`、`_PATH_ABSOLUTE`、`_PATH_DUPLICATE`、`_RESOURCE_DUPLICATE`（zh 中文，
+   en/es/tc 为英文占位）。
+4. 设计约束（不要在实现时丢掉）：
+   - 仍按容器语境编辑，保存时才映射成「Pod 级卷 + 容器级挂载」；
+   - 只读默认开启；取消勾选要在行内提示这是可写挂载；
+   - 预览里的键名原样列出（含点的键在文件挂载下是合法文件名，与 envFrom 的「会被丢弃」提示不同）；
+   - 复用同一资源时卷被复用，界面上不要求用户为卷命名。
+5. 完成后必须补的验证（设计文档前半部分已列为前置条件）：构建 → 部署 → 在测试工作负载上
+   通过本功能的保存路径创建一条文件挂载 → 确认 `volumes`/`volumeMounts` 正确生成并可正确回显
+   → 改被引用的 ConfigMap → 确认 Reloader 触发滚动且挂载文件内容更新（机制已在
+   `test-wes` 用临时对象验证过一次，但那不是走本功能的保存路径）。
+
 ## 已知限制与待决
 
 - **Helm 管理的工作负载上，配置引用不是持久的。** `envFrom`、`volumes` 与 `volumeMounts` 都由
