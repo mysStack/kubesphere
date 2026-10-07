@@ -28,6 +28,13 @@ reloader.stakater.com/auto: "true"
 关闭开关会移除该注解，但不会删除 `envFrom`、ConfigMap、Secret 或 Pod。未安装 Reloader 时，
 配置引用仍然可以保存；只有自动滚动更新不可用。
 
+Reloader 触发滚动更新的方式，是在容器上追加一个
+`STAKATER_<资源名>_<CONFIGMAP|SECRET>` 环境变量，其值为被引用资源的哈希。因此：
+
+- 开启开关后，工作负载的环境变量列表里会多出这类变量。它不是用户配置的，也不应手工修改。
+- 该哈希可用于判断「Pod 是否已经加载最新配置」：它与当前 ConfigMap/Secret 的哈希一致，
+  即表示该 Pod 已同步到最新内容。这比比对时间戳更可靠。
+
 ## 升级、卸载和回滚
 
 ```bash
@@ -41,5 +48,12 @@ kubectl delete -k deploy/reloader
 
 ## 权限边界
 
-Controller 只获取 ConfigMap/Secret 的变更事件，并更新 Deployment、StatefulSet、DaemonSet 的
-滚动更新相关字段。Console 不读取 Secret 的 `data`，页面和错误提示也不展示 Secret 值。
+Controller 读取 ConfigMap/Secret 的变更，更新 Deployment、StatefulSet、DaemonSet 的滚动更新
+相关字段，并写入 Event 说明重载原因；除此之外不持有任何权限。
+
+- `events` 的写权限只影响信息记录，不控制任何资源，是控制器的常规权限。
+- 写 Event 的目的是让重载可见：用户在执行 `kubectl describe`、查看集群事件，或在 Console 的
+  「事件」页时，能看到某次重启是由配置变更触发的，而不是一次无缘无故的重启。缺少该权限时
+  重载不会失败，但会变成静默行为，同时每次成功重载都会在 Reloader 日志里留下一条
+  `events is forbidden` 的 error。
+- Console 不读取 Secret 的 `data`，页面和错误提示也不展示 Secret 值。
