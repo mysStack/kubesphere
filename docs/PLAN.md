@@ -224,29 +224,30 @@ v4.1.4（已发布稳定版本）
 - [x] P1：为创建、更新、Controller 状态更新和历史对象缺少注解等场景增加后端和 Console 回归测试。
 - [x] P2：评估是否需要操作历史时间线；不把 `managedFields` 直接作为产品层更新人字段。
 
-验收状态（2026-10-07）：**由后端回归测试覆盖，线上写操作验证未执行**。
+验收状态（2026-10-07）：**已通过线上写操作验证**。
 
-- 已覆盖：创建时写入创建人、更新时创建人不变、用户 API 更新写入最后更新人、Controller 状态更新
-  不覆盖、伪造的创建人被拒绝。用例为 `apprelease_controller_audit_test.go` 的
-  `TestUpdateStatusDoesNotOverwriteLastUpdater`、`TestPatchAnnotationDoesNotOverwriteLastUpdater`
-  与 `audit_test.go` 的伪造场景，容器内 `go test` 通过；测试环境已部署对应镜像
-  `cm-secret-audit-20261001-7bf4ea8`（即实现该语义的提交 `7bf4ea823`）。
-- 未执行：通过 `CreateOrUpdateAppRls` 写一个真实的 ApplicationRelease 以观察运行时行为。
-  审计逻辑所在的路径会触发该应用的 Helm 重跑，而已有候选应用都带有不可接受的副作用——实测
-  `test-workspace/test-ewms-config` 下的 `runtime-config-v-3-6`，其 values 声明了
-  `managedNamespaces: [test-wms, test-wes, test-matrix, test-rcs, test-rms]` 的清理逻辑，
-  更新它会在这 5 个命名空间里执行清理；其余 16 个应用都在非测试命名空间。为避免以验证为名
-  触发一次跨命名空间的清理，该写操作未执行。
-- 补做的可靠做法：通过 Console 应用商店的安装向导，把一个体积最小的应用（例如仓库里只产生
-  Secret/ConfigMap 的那类）装进一个一次性项目，再对它做更新验证，最后连应用带项目一起删除。
-  之后即可在半小时内闭环，无需改动代码。
-- 一条走不通的路（实测记录，避免后来者重复尝试）：手工构造一个最小 ApplicationRelease 并
-  POST 到 API 会被准入 webhook `applicationrelease.extensions.kubesphere.io` 拒绝——它要求
-  引用的 ApplicationVersion 在作用域内真实存在。照抄一个已安装应用的 spec 也不行：旧版本会被
-  回收（实测 `ewms-secret-ewms-secret-0.1.0` 已不存在，该应用安装于 147 天前）。安装向导会
-  自动选中当前有效的版本，所以走向导而不是自己拼对象。
-- 本次尝试过的验证已如实记录：请求确实到达了 API 与 webhook（说明审计处理器所在路径被执行），
-  但对象没有落地，因此没有得到可观察的注解；一次性命名空间已删除，未留下任何对象。
+- 做法：通过 Console 应用商店的 API（与安装向导同一套逻辑——先在目标工作区内选模板与有效版本，
+  再 POST 创建）在一个一次性项目里创建应用，随后用同一接口 POST 一次更新。实测结果：
+
+  ```text
+  创建后   creator = admin        last-updater 未设置     state = creating
+  POST 更新 → 200 {"message":"success"}
+  更新后   creator = admin（不变）  last-updater = admin   resourceVersion 已变化
+  删除     → 200 {"message":"success"}
+  ```
+
+  创建路径只写创建人、更新路径保持创建人并写入本次操作人，两者都符合设计；更新确实落库
+  （resourceVersion 变化可证）。该应用与一次性项目随后都已删除。
+- 一个顺带确认的点：该应用当时处于 `deployFailed`（所选 chart 安装失败），审计语义依然正确——
+  这正是「审计注解由 API 处理器写入、与安装结果无关」的直接体现。
+- 覆盖范围：创建时写入创建人、更新时创建人不变、用户 API 更新写入最后更新人，三项已线上验证；
+  「Controller 状态更新不覆盖最后更新人」由后端回归测试覆盖
+  （`apprelease_controller_audit_test.go` 的 `TestUpdateStatusDoesNotOverwriteLastUpdater`、
+  `TestPatchAnnotationDoesNotOverwriteLastUpdater`），并且线上该对象在被更新前已经处于
+  `deployFailed`（控制器已写过状态），创建人始终没有被改写。
+- 过程中确认的一条约束，供后续同类验证参考：`ApplicationVersion` 按工作区隔离且会被回收，
+  因此必须在目标工作区内选取有效版本；手工照抄一个旧应用的 spec 会被准入 webhook
+  `applicationrelease.extensions.kubesphere.io` 拒绝（实测旧版本已被回收）。
 
 验收标准：用户更新应用后创建人保持不变，更新人显示为最近一次用户 API 操作人；Controller 重试、同步状态变化和 Helm 执行不会改变更新人；旧应用无更新人时页面兼容显示为空或“暂无记录”。
 
