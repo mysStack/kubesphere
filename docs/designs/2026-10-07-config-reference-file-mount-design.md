@@ -166,6 +166,26 @@ V3 制品内存在卷挂载相关的实现，但源码不可获得，本项目�
    → 改被引用的 ConfigMap → 确认 Reloader 触发滚动且挂载文件内容更新（机制已在
    `test-wes` 用临时对象验证过一次，但那不是走本功能的保存路径）。
 
+
+### 已定位的改动坐标（2026-10-08）
+
+`ConfigReferenceInline.tsx`（403 行，控制台内主路径）：
+
+| 位置 | 内容 |
+|---|---|
+| L112 | `const [references, setReferences] = useState<EnvFromReference[]>([]);` — 文件挂载状态加在它后面 |
+| L231 | `buildConfigReferencePatch(` — 保存调用，`fileMounts` 作为第 5 个参数传入 |
+| L243 | `{t('CONFIG_REFERENCE_SECRET_NOTICE')}` — envFrom 分区的提示行 |
+| L254 | `{t('CONFIG_REFERENCE_ADD')}` — envFrom 的「添加引用」按钮 |
+| L284 | `{references.map((reference, index) => {` — envFrom 的行渲染 |
+| L337 | `<ConfigReferencePreview` — 行内预览，文件挂载分区的插入点在其所属块结束之后 |
+
+`ConfigReferencePanel.tsx`（350 行，独立路由，同样需要改）：references 状态在 L57、patch 调用在
+L169、`CONFIG_REFERENCE_RESOURCES` 分区标题在 L200、行渲染与预览在 L312 附近。
+
+为什么这一层不是"照抄一份"就能完成：两个组件的行 markup 是各自独立实现的，因此两处都要改；
+再加上构建、部署与两条路径的端到端验证，工作量大于"在面板里加一个分区"的直觉。
+
 ## 已知限制与待决
 
 - **Helm 管理的工作负载上，配置引用不是持久的。** `envFrom`、`volumes` 与 `volumeMounts` 都由
