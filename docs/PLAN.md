@@ -224,6 +224,23 @@ v4.1.4（已发布稳定版本）
 - [x] P1：为创建、更新、Controller 状态更新和历史对象缺少注解等场景增加后端和 Console 回归测试。
 - [x] P2：评估是否需要操作历史时间线；不把 `managedFields` 直接作为产品层更新人字段。
 
+验收状态（2026-10-07）：**由后端回归测试覆盖，线上写操作验证未执行**。
+
+- 已覆盖：创建时写入创建人、更新时创建人不变、用户 API 更新写入最后更新人、Controller 状态更新
+  不覆盖、伪造的创建人被拒绝。用例为 `apprelease_controller_audit_test.go` 的
+  `TestUpdateStatusDoesNotOverwriteLastUpdater`、`TestPatchAnnotationDoesNotOverwriteLastUpdater`
+  与 `audit_test.go` 的伪造场景，容器内 `go test` 通过；测试环境已部署对应镜像
+  `cm-secret-audit-20261001-7bf4ea8`（即实现该语义的提交 `7bf4ea823`）。
+- 未执行：通过 `CreateOrUpdateAppRls` 写一个真实的 ApplicationRelease 以观察运行时行为。
+  审计逻辑所在的路径会触发该应用的 Helm 重跑，而已有候选应用都带有不可接受的副作用——实测
+  `test-workspace/test-ewms-config` 下的 `runtime-config-v-3-6`，其 values 声明了
+  `managedNamespaces: [test-wms, test-wes, test-matrix, test-rcs, test-rms]` 的清理逻辑，
+  更新它会在这 5 个命名空间里执行清理；其余 16 个应用都在非测试命名空间。为避免以验证为名
+  触发一次跨命名空间的清理，该写操作未执行。
+- 补做需要以下任一个：一个可接受被 Helm 重跑的一次性应用；或允许新建一个指向不存在
+  app/version 的最小 ApplicationRelease（安装会失败、没有真实资源落地，代价是短暂的重试与
+  事件噪声），验证后立即删除。得到其中任一个即可在半小时内闭环，无需改动代码。
+
 验收标准：用户更新应用后创建人保持不变，更新人显示为最近一次用户 API 操作人；Controller 重试、同步状态变化和 Helm 执行不会改变更新人；旧应用无更新人时页面兼容显示为空或“暂无记录”。
 
 ### 合并开发评估
