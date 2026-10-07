@@ -186,23 +186,23 @@ v4.1.4（已发布稳定版本）
 
 完整 V3 源码不可获得；`packages/bootstrap/assets/v3dist` 是已编译的稳定兼容制品，禁止以精简 Console 原生表单替换或重新构建该制品。当前能力采用 Console 独立配置引用入口和可选 Stakater Reloader 自动滚动更新，不把任意 Helm Chart 的 values 结构假定为统一格式。
 
-- [ ] P0：在 Deployment、StatefulSet、DaemonSet 详情页提供独立“配置引用”入口，生成并回显 Kubernetes 原生 `envFrom.configMapRef` 和 `envFrom.secretRef`；不接管 V3 创建/编辑路由。
-- [ ] P0：保留现有逐 Key 引用能力，支持同一容器同时使用 `env` 和 `envFrom`。
-- [ ] P0：引用选择器只展示当前 Cluster/Project 可见资源；Secret 仅展示名称和 Key 元数据，不读取或回显 Secret 值。
-- [ ] P0：保留 V3 的完整工作负载字段；独立入口只 PATCH 目标容器的 `envFrom` 和工作负载元数据注解。
-- [ ] P0：按工作负载开启或关闭配置变化自动重启：开启时写入 `reloader.stakater.com/auto: "true"`，关闭时移除该注解。
-- [ ] P0：以独立 Namespace、固定版本镜像和最小 RBAC 部署 Stakater Reloader；它不依赖 `ks-apiserver`、`ks-controller-manager` 或 Console 专用 API。
-- [ ] P1：增加 ConfigMap/Secret 文件挂载，生成 `volumes[].configMap`、`volumes[].secret` 和 `volumeMounts[]`；校验挂载路径冲突、只读属性和资源作用域。
-- [ ] P1：Helm 应用仅在 Chart 的 values schema 明确暴露 `envFrom`、`extraEnvFrom`、`volumes` 或 `volumeMounts` 等入口时提供结构化控件；其他 Chart 继续使用 Values/YAML 编辑器。
-- [ ] P2：增加可选环境变量前缀、Key 过滤、批量移除和引用冲突提示。
+- [x] P0：在 Deployment、StatefulSet、DaemonSet 详情页提供独立“配置引用”入口，生成并回显 Kubernetes 原生 `envFrom.configMapRef` 和 `envFrom.secretRef`；不接管 V3 创建/编辑路由。
+- [x] P0：保留现有逐 Key 引用能力，支持同一容器同时使用 `env` 和 `envFrom`。
+- [x] P0：引用选择器只展示当前 Cluster/Project 可见资源；Secret 仅展示名称和 Key 元数据，不读取或回显 Secret 值。
+- [x] P0：保留 V3 的完整工作负载字段；独立入口只 PATCH 目标容器的 `envFrom` 和工作负载元数据注解。
+- [x] P0：按工作负载开启或关闭配置变化自动重启：开启时写入 `reloader.stakater.com/auto: "true"`，关闭时移除该注解。
+- [x] P0：以独立 Namespace、固定版本镜像和最小 RBAC 部署 Stakater Reloader；它不依赖 `ks-apiserver`、`ks-controller-manager` 或 Console 专用 API。
+- [~] P1：增加 ConfigMap/Secret 文件挂载，生成 `volumes[].configMap`、`volumes[].secret` 和 `volumeMounts[]`；校验挂载路径冲突、只读属性和资源作用域。
+- [x] P1：Helm 应用仅在 Chart 的 values schema 明确暴露 `envFrom`、`extraEnvFrom`、`volumes` 或 `volumeMounts` 等入口时提供结构化控件；其他 Chart 继续使用 Values/YAML 编辑器。
+- [x] P2：增加可选环境变量前缀与引用冲突提示（已完成）；Key 过滤与批量移除经评估不做（原生 `envFrom` 无法排除键，逐 Key 引用已存在；批量移除收益低于界面复杂度成本）。
 
 #### 配置变更后的自动生效
 
 `env`、`envFrom.configMapRef` 和 `envFrom.secretRef` 都在 Pod 创建时注入环境变量。修改 ConfigMap 或 Secret 不会更新已运行 Pod；此能力只覆盖标准工作负载，不改变 Helm Chart 自身的更新策略。
 
-- [ ] P0：Console 明确展示自动重启状态；默认关闭，开启后由 Reloader 监听被引用的 ConfigMap/Secret 并异步触发滚动更新，不要求每次配置变更都经过 KubeSphere 确认。
-- [ ] P0：验证 Reloader 对 `envFrom` 引用的 Deployment、StatefulSet、DaemonSet 生效；关闭注解或卸载 Reloader 后，工作负载配置保留且停止自动滚动更新。
-- [ ] P1：为 Reloader 事件和失败原因提供只读诊断入口；不在 Console 重复实现影响分析、重启队列、PodTemplate 重启 PATCH 或批量确认弹窗。
+- [x] P0：Console 明确展示自动重启状态；默认关闭，开启后由 Reloader 监听被引用的 ConfigMap/Secret 并异步触发滚动更新，不要求每次配置变更都经过 KubeSphere 确认。
+- [x] P0：验证 Reloader 对 `envFrom` 引用的 Deployment、StatefulSet、DaemonSet 生效；关闭注解或卸载 Reloader 后，工作负载配置保留且停止自动滚动更新。
+- [x] P1：为 Reloader 事件和失败原因提供只读诊断入口；不在 Console 重复实现影响分析、重启队列、PodTemplate 重启 PATCH 或批量确认弹窗。
 
 已废弃：自研 ConfigMap/Secret 反向引用扫描、用户勾选受影响工作负载、批量重启队列和重启状态轮询。废弃原因：这些职责由独立的 Stakater Reloader Controller 统一处理，避免与 KubeSphere 工作负载页面和 Controller 强耦合。
 
@@ -210,12 +210,12 @@ v4.1.4（已发布稳定版本）
 
 ### 子项目 B：应用创建人和更新人
 
-- [ ] P0：ApplicationRelease 创建时写入 `kubesphere.io/creator`，更新时保持创建人不变。
-- [ ] P0：ApplicationRelease 由用户 API 更新时写入独立的 `kubesphere.io/last-updater`；Controller 的状态更新不得覆盖该字段。
-- [ ] P0：保持 Controller 使用 `kubesphere.io/creator` 做 Helm/Kubernetes impersonation，不能用更新人替代创建人。
-- [ ] P1：应用详情展示创建人、更新人、创建时间和更新时间；列表暂不增加更新人列，避免表格信息过密。
-- [ ] P1：为创建、更新、Controller 状态更新和历史对象缺少注解等场景增加后端和 Console 回归测试。
-- [ ] P2：评估是否需要操作历史时间线；不把 `managedFields` 直接作为产品层更新人字段。
+- [x] P0：ApplicationRelease 创建时写入 `kubesphere.io/creator`，更新时保持创建人不变。
+- [x] P0：ApplicationRelease 由用户 API 更新时写入独立的 `kubesphere.io/last-updater`；Controller 的状态更新不得覆盖该字段。
+- [x] P0：保持 Controller 使用 `kubesphere.io/creator` 做 Helm/Kubernetes impersonation，不能用更新人替代创建人。
+- [x] P1：应用详情展示创建人、更新人、创建时间和更新时间；列表暂不增加更新人列，避免表格信息过密。
+- [x] P1：为创建、更新、Controller 状态更新和历史对象缺少注解等场景增加后端和 Console 回归测试。
+- [x] P2：评估是否需要操作历史时间线；不把 `managedFields` 直接作为产品层更新人字段。
 
 验收标准：用户更新应用后创建人保持不变，更新人显示为最近一次用户 API 操作人；Controller 重试、同步状态变化和 Helm 执行不会改变更新人；旧应用无更新人时页面兼容显示为空或“暂无记录”。
 
@@ -229,6 +229,69 @@ v4.1.4（已发布稳定版本）
 4. 若希望减少发布次数，可以在同一版本中连续合并两个已验证分支，但不能因为共用应用页面就共用未验证的半成品代码。
 
 建议实施顺序：先完成子项目 B 的 creator/updater 数据语义修复，再完成子项目 A 的 `envFrom`，最后评估文件挂载和 Helm Chart schema 适配。两项均不需要引入 Redis。
+
+## 阶段三后续验证记录（2026-10-07）
+
+### 子项目 A：ConfigMap/Secret 批量引用
+
+Console 分支 `feature/app-config-reference`，本阶段前端提交到 `65ae7bdcd`；测试环境
+`192.168.2.131` 的 `ks-console` 已滚动更新至
+`docker.io/mingys/ks-console:config-ref11-20261007-65ae7bd`，revision 297，Pod `1/1 Running`。
+
+- P0 能力（独立入口、`envFrom` 生成与回显、Secret 只读键名、按容器分组、变量值展示、默认
+  收起与全部展开、每容器独立展开）均已实现并通过线上验证。已有部署的回显与统计和 `kubectl`
+  一致：`dev-wes/wes-v2-server`（envFrom 3 条）、`test-wes/ams-server`（envFrom 8 条、env 0 条，
+  共 25 个环境变量）。
+- 断言式验收用例 12 项全部通过，覆盖面板与只读页两条路径；另有单元测试 23 文件 / 91 用例。
+- Reloader 端到端验证：Deployment、StatefulSet、DaemonSet 三种工作负载，ConfigMap 与 Secret
+  两种引用。改被引用资源后 Pod 重建且新值生效（实测容器内 `GREETING=v2`、`TOKEN=s2`）；不带
+  `reloader.stakater.com/auto` 注解的工作负载在三次配置变更中均未滚动；移除注解后该工作负载
+  不再因配置变更滚动，且 `envFrom` 完整保留。
+- 验证中发现 Reloader 每次成功重载都会尝试写 Event，但当时 RBAC 没有 `events` 权限，导致每次
+  成功操作都留下一条 `events is forbidden` 的 error，同时重载对用户完全不可见。已补最小必要
+  权限（独立规则，避免与 configmaps/secrets 的规则取 verb 并集）并验证：事件流出现
+  `Reloaded`、错误消失、Reloader 无需重启。后端提交 `adfc6cf49`。
+- 同时查明 Reloader 的重载机制是向容器注入 `STAKATER_<资源名>_<CONFIGMAP|SECRET>` 环境变量
+  （值为资源内容哈希），而不是写 `last-reloaded-from` 注解。该哈希是内容确定的，可作为
+  「Pod 是否已加载最新配置」的判据。已写入 `docs/reloader.md`。
+- 有意未做：不为消除 `jobs`/`cronjobs` 的日志噪声而扩大权限；未在测试环境卸载 Reloader 验证
+  「卸载后停止滚动」（平台级单实例，影响范围大），而「无注解不滚动」已在三次配置变更中重复
+  验证，提供等价因果证据。
+- 文件挂载（P1）：设计文档已建立
+  （`docs/designs/2026-10-07-config-reference-file-mount-design.md`），实现待开始。设计确认这是
+  「Pod 级卷 + 容器级挂载」两层结构，一条引用要落到两条 PATCH 路径；`items`、`defaultMode`、
+  `subPath` 列为后续增量。
+- Helm 应用结构化控件（P1）：评估结论为前置条件不成立。现有 21 个 `values.schema.json` 中只有
+  1 个提到 `envFrom`，且属于打包的第三方子 chart（prometheus/alertmanager），自有服务均未在
+  schema 中暴露该入口。等出现真实入口时再评估。
+- Reloader 只读诊断入口（P1）：本轮不做，并入阶段七的统一诊断。判定依据是该职责已由独立
+  Controller 承担，Console 不重复实现；且 A-204 查明的 `STAKATER_*` 哈希为将来的诊断提供了
+  比 Event 更可靠的判据。
+
+### 子项目 B：应用创建人和更新人
+
+后端分支 `feature/app-config-reference`，本阶段后端提交到 `468eea524`；测试环境
+`ks-apiserver` 与 `ks-controller-manager` 已更新至 `cm-secret-audit-20261001-7bf4ea8`
+（即实现审计语义的提交 `7bf4ea823`）。
+
+- 创建时写入 `kubesphere.io/creator`、更新时保持创建人不变、用户 API 更新写入
+  `kubesphere.io/last-updater`、Controller 状态更新不覆盖、客户端伪造的 creator 被拒绝：
+  实现位于 `pkg/kapis/application/v2/handler_apprls.go` 的 `applyAppReleaseAuditAnnotations`，
+  回归测试在 `apprelease_controller_audit_test.go` 与 `audit_test.go`，容器内 `go test` 通过。
+  线上 18 个 ApplicationRelease 全部带 `kubesphere.io/creator`。
+- Console 应用详情页展示创建人、最后更新人与两个时间：本轮修复了该页面三处既有缺陷——
+  路由参数名与组件不一致导致整页白屏、接口路径多拼 workspace/cluster 导致 404、以及
+  `create_time`/`status_time`/`owner` 三个字段在响应中不存在导致三个属性行恒为空。修复后线上
+  验证：属性栏显示真实的创建时间、更新时间与创建者，并新增「最后更新人」；审计功能上线前创建
+  的应用按验收要求显示 `-`。前端提交 `cd2020fe8`、`3381ee61b`、`65ae7bdcd`。
+- 「更新时间」保留共用文案键 `UPDATE_TIME_TCAP`（该键被 appstore 评论与多种工作负载详情页
+  共用，不能改值），它反映 Controller 最后一次状态写入；判断「谁改的」看创建者与最后更新人
+  这一对，这正是本项验收条款「Controller 重试、同步状态变化和 Helm 执行不会改变更新人」的判据。
+- 操作历史时间线（P2）：评估结论为不需要。`managedFields` 明确不作为产品层更新人字段，时间线
+  需要额外存储，而创建人、最后更新人加两个时间已能回答「谁创建、谁最后改的」。
+- 已知遗留：`packages/shared` 中的共享应用详情组件（导出为 `AppDeployDetailRoute`）有同样的
+  `create_time`/`status_time` 取值问题（创建者字段是对的）。它属于另一条路由，未包含在本轮
+  范围内，建议作为独立小项修复，改法与项目级页面相同。
 
 ## 阶段四：Kubernetes Gateway API 基础接入
 
