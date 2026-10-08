@@ -128,6 +128,20 @@ func SourceName(historyName string) (string, bool) {
 	return strings.TrimSuffix(historyName, HistorySecretSuffix), true
 }
 
+// WorkspaceLabelKey marks a KubeSphere project namespace. Only namespaces carrying it are
+// recorded.
+//
+// The scope is not optional. Without it the controllers watch and record cluster-wide: on
+// their first deployment they created 516 history Secrets in 15 minutes, including inside
+// kubesphere-system, kubesphere-monitoring-system and alerting. Those are not project
+// resources, and the object count is the real cost of this feature, not the payload size.
+const WorkspaceLabelKey = "kubesphere.io/workspace"
+
+// IsManagedNamespace reports whether a namespace is in scope for recording.
+func IsManagedNamespace(namespaceLabels map[string]string) bool {
+	return namespaceLabels[WorkspaceLabelKey] != ""
+}
+
 // ContentHash fingerprints content so an unchanged object does not produce a record.
 // Keys are sorted, so the value is stable across map iteration order.
 func ContentHash(content map[string]string) string {

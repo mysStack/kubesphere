@@ -24,7 +24,16 @@ func fixedNow() time.Time { return time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 
 func newClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
-	return fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(objects...).Build()
+	// Only project namespaces are in scope, so the shared test namespace carries the label.
+	// A test that needs an out-of-scope namespace builds its own client.
+	project := &v1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name:   "dev-wes",
+		Labels: map[string]string{WorkspaceLabelKey: "dev-workspace"},
+	}}
+	return fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(append([]client.Object{project}, objects...)...).
+		Build()
 }
 
 func loadSecret(t *testing.T, c client.Client, namespace, name string) *v1.Secret {
@@ -273,5 +282,29 @@ func TestReconcileOfADeletedObjectIsNotAnError(t *testing.T) {
 		NamespacedName: client.ObjectKey{Namespace: "dev-wes", Name: "gone"},
 	}); err != nil {
 		t.Fatalf("a deleted object should be ignored, got error %v", err)
+	}
+}
+
+// The scope rule, and the reason it exists: the first deployment of these controllers
+// recorded cluster-wide and created 516 history Secrets in 15 minutes, including inside
+// system namespaces.
+func TestReconcilersSkipNamespacesThatAreNotProjects(t *testing.T) {
+	systemNS := &v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "kube-system"}}
+	configMap := &v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "coredns"},
+		Data:       map[string]string{"A": "1"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(systemNS, configMap).Build()
+	r := &ConfigMapReconciler{Client: c, Store: Store{Client: c, Now: fixedNow}}
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: client.ObjectKeyFromObject(configMap),
+	}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKey{
+		Namespace: "kube-system", Name: "coredns-history",
+	}, &v1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("a namespace that is not a project must not be recorded (err = %v)", err)
 	}
 }

@@ -120,6 +120,23 @@ func (s *Store) save(ctx context.Context, source client.Object, records []Record
 	return s.Client.Update(ctx, existing)
 }
 
+// ensureNamespaceInScope keeps the controllers from recording outside KubeSphere projects.
+// The check reads the namespace from the manager's cache, so it costs no API round trip per
+// reconcile. Returning nil means "in scope"; a non-nil error means the reconcile failed.
+func ensureNamespaceInScope(ctx context.Context, c client.Client, namespace string) (bool, error) {
+	if namespace == "" {
+		return false, nil
+	}
+	ns := &v1.Namespace{}
+	if err := c.Get(ctx, client.ObjectKey{Name: namespace}, ns); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return IsManagedNamespace(ns.Labels), nil
+}
+
 // ConfigMapReconciler records ConfigMap changes.
 type ConfigMapReconciler struct {
 	client.Client
@@ -148,8 +165,16 @@ func (r *ConfigMapReconciler) SetupWithManager(mgr *kscontroller.Manager) error 
 }
 
 // Reconcile implements reconcile.Reconciler.
+
 func (r *ConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	if IsExcluded("ConfigMap", req.Name) {
+		return ctrl.Result{}, nil
+	}
+	inScope, err := ensureNamespaceInScope(ctx, r.Client, req.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !inScope {
 		return ctrl.Result{}, nil
 	}
 	configMap := &v1.ConfigMap{}
@@ -199,10 +224,18 @@ func (r *SecretReconciler) SetupWithManager(mgr *kscontroller.Manager) error {
 }
 
 // Reconcile implements reconcile.Reconciler.
+
 func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	// This is the guard that stops the loop: the history Secret we write is itself a
 	// Secret, so its own write would otherwise enqueue another reconcile forever.
 	if IsExcluded("Secret", req.Name) {
+		return ctrl.Result{}, nil
+	}
+	inScope, err := ensureNamespaceInScope(ctx, r.Client, req.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !inScope {
 		return ctrl.Result{}, nil
 	}
 	secret := &v1.Secret{}
