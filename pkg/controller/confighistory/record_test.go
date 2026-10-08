@@ -227,3 +227,25 @@ func TestIsHistoryObject(t *testing.T) {
 		t.Fatal("an ordinary Secret must not be treated as ours")
 	}
 }
+
+func TestIsManagedNamespace(t *testing.T) {
+	cases := []struct {
+		name   string
+		labels map[string]string
+		want   bool
+	}{
+		{"a project namespace is in scope", map[string]string{WorkspaceLabelKey: "dev-workspace"}, true},
+		{"test workspace projects are in scope", map[string]string{WorkspaceLabelKey: "test-workspace"}, true},
+		{"public workspace projects are in scope", map[string]string{WorkspaceLabelKey: "public-workspace"}, true},
+		{"system-workspace is not a project", map[string]string{WorkspaceLabelKey: SystemWorkspace}, false},
+		{"a namespace without a workspace label is not in scope", map[string]string{"foo": "bar"}, false},
+		{"no labels at all", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsManagedNamespace(c.labels); got != c.want {
+				t.Fatalf("IsManagedNamespace(%v) = %v, want %v", c.labels, got, c.want)
+			}
+		})
+	}
+}

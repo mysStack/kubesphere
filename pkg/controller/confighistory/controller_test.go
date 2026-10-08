@@ -308,3 +308,30 @@ func TestReconcilersSkipNamespacesThatAreNotProjects(t *testing.T) {
 		t.Fatalf("a namespace that is not a project must not be recorded (err = %v)", err)
 	}
 }
+
+// The second scope incident: namespaces in system-workspace carry the workspace label just
+// like projects do, so a label-only rule recorded kube-system, kubesphere-system and the rest.
+// 513 objects appeared in one run before this was caught.
+func TestReconcilersSkipSystemWorkspace(t *testing.T) {
+	systemNS := &v1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name:   "kubesphere-monitoring-system",
+		Labels: map[string]string{WorkspaceLabelKey: SystemWorkspace},
+	}}
+	configMap := &v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "kubesphere-monitoring-system", Name: "probe"},
+		Data:       map[string]string{"A": "1"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(systemNS, configMap).Build()
+	r := &ConfigMapReconciler{Client: c, Store: Store{Client: c, Now: fixedNow}}
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: client.ObjectKeyFromObject(configMap),
+	}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKey{
+		Namespace: "kubesphere-monitoring-system", Name: "probe-history",
+	}, &v1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("a system-workspace namespace must not be recorded (err = %v)", err)
+	}
+}

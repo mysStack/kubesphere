@@ -137,9 +137,24 @@ func SourceName(historyName string) (string, bool) {
 // resources, and the object count is the real cost of this feature, not the payload size.
 const WorkspaceLabelKey = "kubesphere.io/workspace"
 
+// SystemWorkspace is the workspace KubeSphere keeps its own namespaces in. Everything there is
+// platform machinery (default, kube-system, kubesphere-system, extension-*), not a project.
+const SystemWorkspace = "system-workspace"
+
 // IsManagedNamespace reports whether a namespace is in scope for recording.
+//
+// The workspace label alone is NOT a discriminator: every system namespace carries it too,
+// because KubeSphere puts them all in system-workspace. Measured on this cluster: 25
+// namespaces in system-workspace against 13 in dev-workspace, 15 in test-workspace and 6 in
+// public-workspace. Using the label by itself selected 59 of 61 namespaces, including
+// kube-system and kubesphere-system, and produced 513 history objects in a single run.
+//
+// So a namespace is in scope when it belongs to a workspace and that workspace is not
+// system-workspace. The two namespaces without any workspace label (argo-events,
+// kubesphere-reloader) are also out of scope, which is correct: they are extension-managed.
 func IsManagedNamespace(namespaceLabels map[string]string) bool {
-	return namespaceLabels[WorkspaceLabelKey] != ""
+	workspace := namespaceLabels[WorkspaceLabelKey]
+	return workspace != "" && workspace != SystemWorkspace
 }
 
 // ContentHash fingerprints content so an unchanged object does not produce a record.
