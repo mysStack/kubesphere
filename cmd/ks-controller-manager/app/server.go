@@ -28,6 +28,7 @@ import (
 	"kubesphere.io/kubesphere/pkg/controller/clusterrole"
 	"kubesphere.io/kubesphere/pkg/controller/clusterrolebinding"
 	ksconfig "kubesphere.io/kubesphere/pkg/controller/config"
+	"kubesphere.io/kubesphere/pkg/controller/confighistory"
 	"kubesphere.io/kubesphere/pkg/controller/conversion"
 	"kubesphere.io/kubesphere/pkg/controller/core"
 	"kubesphere.io/kubesphere/pkg/controller/extension"
@@ -123,6 +124,8 @@ func init() {
 	runtime.Must(controller.Register(&kubectl.Reconciler{}))
 	runtime.Must(controller.Register(&serviceaccounttoken.Reconciler{}))
 	runtime.Must(controller.Register(&resourceprotection.Webhook{}))
+	runtime.Must(controller.Register(&confighistory.ConfigMapReconciler{}))
+	runtime.Must(controller.Register(&confighistory.SecretReconciler{}))
 }
 
 func NewControllerManagerCommand() *cobra.Command {
