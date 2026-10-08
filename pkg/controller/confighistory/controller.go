@@ -8,6 +8,7 @@ package confighistory
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -137,12 +138,73 @@ func ensureNamespaceInScope(ctx context.Context, c client.Client, namespace stri
 	return IsManagedNamespace(ns.Labels), nil
 }
 
+// baseline remembers which objects this process has already seen, so that the informer's
+// initial enumeration does not create history for an entire inventory.
+//
+// This is what went wrong three times while this feature was being deployed. At startup the
+// API machinery enqueues every existing object, and writing "the current state" for each of
+// them created 516, then 513, then 376 objects on an idle cluster. The measurement that
+// settled it: zero Secrets changed in three minutes, yet 376 objects appeared in ninety
+// seconds -- that is the enumeration, not churn.
+//
+// The baseline holds hashes only, never content, and lives in memory. A change that happens
+// while this process is down is therefore missed. That is the price of not seeding, and it is
+// recorded in the design document.
+type baseline struct {
+	mu   sync.Mutex
+	seen map[string]string
+}
+
+func newBaseline() *baseline { return &baseline{seen: map[string]string{}} }
+
+// rememberHash reports whether content differs from the last time this key was seen. The
+// first sighting is a baseline, not a change. A nil baseline means "no baseline tracking",
+// which lets a caller (or a test) exercise the recording path directly.
+func (b *baseline) rememberHash(key, hash string) bool {
+	if b == nil {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.seen == nil {
+		b.seen = map[string]string{}
+	}
+	previous, seen := b.seen[key]
+	b.seen[key] = hash
+	if !seen {
+		return false
+	}
+	return previous != hash
+}
+
+// record decides whether this reconcile observed a change worth recording, and writes it.
+func recordChange(ctx context.Context, store *Store, base *baseline, source client.Object, content map[string]string) ([]Record, bool, error) {
+	records, err := store.Load(ctx, source.GetNamespace(), source.GetName())
+	if err != nil {
+		return nil, false, err
+	}
+	key := source.GetNamespace() + "/" + source.GetName()
+	if len(records) == 0 {
+		if !base.rememberHash(key, ContentHash(content)) {
+			return nil, false, nil
+		}
+	} else if !ShouldAppend(records, content) {
+		return records, false, nil
+	}
+	records = Append(records, NewRecord(records, content, source.GetAnnotations(), store.now()))
+	if err := store.save(ctx, source, records); err != nil {
+		return nil, false, err
+	}
+	return records, true, nil
+}
+
 // ConfigMapReconciler records ConfigMap changes.
 type ConfigMapReconciler struct {
 	client.Client
 	Logger        logr.Logger
 	EventRecorder record.EventRecorder
 	Store         Store
+	Baseline      *baseline
 }
 
 var _ kscontroller.Controller = &ConfigMapReconciler{}
@@ -157,6 +219,7 @@ func (r *ConfigMapReconciler) SetupWithManager(mgr *kscontroller.Manager) error 
 	r.Logger = ctrl.Log.WithName("controllers").WithName(ConfigMapControllerName)
 	r.EventRecorder = mgr.GetEventRecorderFor(ConfigMapControllerName)
 	r.Store = Store{Client: mgr.GetClient()}
+	r.Baseline = newBaseline()
 	return builder.ControllerManagedBy(mgr).
 		For(&v1.ConfigMap{}).
 		WithEventFilter(predicate.ResourceVersionChangedPredicate{}).
@@ -181,7 +244,8 @@ func (r *ConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.Get(ctx, req.NamespacedName, configMap); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	records, appended, err := r.Store.Append(ctx, configMap, ContentFromConfigMap(configMap.Data, configMap.BinaryData))
+	content := ContentFromConfigMap(configMap.Data, configMap.BinaryData)
+	records, appended, err := recordChange(ctx, &r.Store, r.Baseline, configMap, content)
 	if err != nil {
 		if r.Logger.Enabled() {
 			r.Logger.Error(err, "failed to record configmap change", "namespace", req.Namespace, "name", req.Name)
@@ -202,6 +266,7 @@ type SecretReconciler struct {
 	Logger        logr.Logger
 	EventRecorder record.EventRecorder
 	Store         Store
+	Baseline      *baseline
 }
 
 var _ kscontroller.Controller = &SecretReconciler{}
@@ -216,6 +281,7 @@ func (r *SecretReconciler) SetupWithManager(mgr *kscontroller.Manager) error {
 	r.Logger = ctrl.Log.WithName("controllers").WithName(SecretControllerName)
 	r.EventRecorder = mgr.GetEventRecorderFor(SecretControllerName)
 	r.Store = Store{Client: mgr.GetClient()}
+	r.Baseline = newBaseline()
 	return builder.ControllerManagedBy(mgr).
 		For(&v1.Secret{}).
 		WithEventFilter(predicate.ResourceVersionChangedPredicate{}).
@@ -242,7 +308,8 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err := r.Get(ctx, req.NamespacedName, secret); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	records, appended, err := r.Store.Append(ctx, secret, ContentFromSecret(secret.Data))
+	content := ContentFromSecret(secret.Data)
+	records, appended, err := recordChange(ctx, &r.Store, r.Baseline, secret, content)
 	if err != nil {
 		if r.Logger.Enabled() {
 			r.Logger.Error(err, "failed to record secret change", "namespace", req.Namespace, "name", req.Name)

@@ -8,6 +8,7 @@ package confighistory
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -333,5 +334,87 @@ func TestReconcilersSkipSystemWorkspace(t *testing.T) {
 		Namespace: "kubesphere-monitoring-system", Name: "probe-history",
 	}, &v1.Secret{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("a system-workspace namespace must not be recorded (err = %v)", err)
+	}
+}
+
+// The incident, as a test: at startup the informer enumerates every existing object. That
+// must not create history for any of them -- it created 516, 513 and then 376 objects on an
+// idle cluster across three deployments.
+func TestStartupEnumerationRecordsNothing(t *testing.T) {
+	project := &v1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: "dev-wes", Labels: map[string]string{WorkspaceLabelKey: "dev-workspace"},
+	}}
+	var objects []client.Object
+	objects = append(objects, project)
+	for i := 0; i < 5; i++ {
+		objects = append(objects,
+			&v1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "dev-wes", Name: fmt.Sprintf("cm-%d", i)},
+				Data:       map[string]string{"A": "1"},
+			},
+			&v1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "dev-wes", Name: fmt.Sprintf("sec-%d", i)},
+				Data:       map[string][]byte{"K": []byte("v")},
+			})
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(objects...).Build()
+	cmr := &ConfigMapReconciler{Client: c, Store: Store{Client: c, Now: fixedNow}, Baseline: newBaseline()}
+	sr := &SecretReconciler{Client: c, Store: Store{Client: c, Now: fixedNow}, Baseline: newBaseline()}
+
+	for _, o := range objects[1:] {
+		r := cmr
+		req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(o)}
+		if _, isSecret := o.(*v1.Secret); isSecret {
+			if _, err := sr.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			continue
+		}
+		if _, err := r.Reconcile(context.Background(), req); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+	}
+
+	secrets := &v1.SecretList{}
+	if err := c.List(context.Background(), secrets, client.InNamespace("dev-wes")); err != nil {
+		t.Fatalf("list secrets: %v", err)
+	}
+	if len(secrets.Items) != 5 {
+		t.Fatalf("startup enumeration created %d extra objects, want 0 (history Secrets are the only extra ones)", len(secrets.Items)-5)
+	}
+}
+
+// And once content really changes, the history starts -- with no predecessor to compare to.
+func TestFirstChangeAfterBaselineStartsTheHistory(t *testing.T) {
+	configMap := &v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "dev-wes", Name: "app-config"},
+		Data:       map[string]string{"A": "1"},
+	}
+	c := newClient(t, configMap)
+	r := &ConfigMapReconciler{Client: c, Store: Store{Client: c, Now: fixedNow}, Baseline: newBaseline()}
+	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(configMap)}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("baseline reconcile error = %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKey{
+		Namespace: "dev-wes", Name: "app-config-history",
+	}, &v1.Secret{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the baseline must not write anything (err = %v)", err)
+	}
+
+	configMap.Data["A"] = "2"
+	if err := c.Update(context.Background(), configMap); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("change reconcile error = %v", err)
+	}
+	records, err := (&Store{Client: c}).Load(context.Background(), "dev-wes", "app-config")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(records) != 1 || records[0].Content["A"] != "2" {
+		t.Fatalf("the first real change should have started the history: %+v", records)
 	}
 }
