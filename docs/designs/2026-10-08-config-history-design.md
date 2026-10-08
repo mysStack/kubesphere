@@ -19,7 +19,13 @@
    → **把 10 份快照存进对象自身的注解不可行**，必须存到独立对象。
 4. 控制器骨架齐备：`pkg/controller/` 下已有约 40 个 controller（含 `secret`），统一以
    `SetupWithManager(mgr *kscontroller.Manager)` 注册，新增一个 watch 型 controller 是既有路径。
-5. 关键取舍依据：**记录必须由 watch 产生，而不是在写入时打标**。因为本集群的变更几乎全部走
+5. **变更来源不可得**：唯一可能承载调用者身份的 `metadata.managedFields` 在本集群**为空** ——
+   实测 393 个 ConfigMap 与 309 个 Secret，无一存在 managedFields 条目（k3s 行为）。因此任何
+   "Helm / kubectl / 控制台"式的来源标注都不可实现。可可靠推导的只有下面三类"管理方式"：
+   对象上有 `meta.helm.sh/release-name` → Helm 管理；有 `replicator.v1.mittwald.de/*` → replicator
+   同步；其余 → 直接管理。要精确定位某一次是谁改的，只有 apiserver 审计日志能做到，而本需求
+   明确不需要该信息。
+6. 关键取舍依据：**记录必须由 watch 产生，而不是在写入时打标**。因为本集群的变更几乎全部走
    Helm / kubectl / CI，绕过控制台 API；watch 监听的是 API server 的变更通知，因此覆盖所有写入
    路径。这也是本条需求能成立、而"最后更新人"那类写入时打标方案不成立的根本原因。
 
@@ -35,8 +41,10 @@
 - **必须忽略自己写记录引起的变更**，否则自触发死循环 —— 这是本实现的首要风险点。
 - 排除 Helm release secret（`sh.helm.release.v1.*`）：它们是 Helm 的内部状态，体积最大且每次
   Helm 操作都变，记录它们既无意义又会迅速撑大存储。
-- 记录"来源"可从对象自身的 `managedFields` / 已知注解推断（helm / kubectl / replicator / 控制台），
-  仅作为参考信息展示，不作为审计依据（这不是需求目标）。
+- 记录"**管理方式**"从对象注解可靠推导，不使用 `managedFields`（见证据第 5 条，本集群它为空）：
+  有 `meta.helm.sh/release-name` → 记为「Helm 管理」并带上 release 名；有
+  `replicator.v1.mittwald.de/*` → 记为「replicator 同步」并带上源版本；其余记为「直接管理」。
+  该字段只描述"这个对象由谁在管"，**不声称知道某一次是谁改的**。
 
 ### 存储：同命名空间的独立 Secret
 
@@ -44,7 +52,7 @@
   Secret。**一律用 Secret**，避免把 Secret 内容以明文写进 ConfigMap。
 - 放在**源对象所在的命名空间**，从而自然沿用项目级 RBAC 边界。
 - 记录内容为 gzip + base64 的 JSON 数组，元素形如
-  `{revision, createdAt, source, size, data}`；并对单条记录设置体积上限（超限时只存摘要标记，
+  `{revision, createdAt, managedBy, managedByRef, size, data}`；并对单条记录设置体积上限（超限时只存摘要标记，
   不存内容），避免个别超大对象把存储撑爆。
 
 ### 前端：复用现有视图
@@ -58,6 +66,12 @@
 - **不做回退**。本集群大量配置对象由 Helm 管理，把历史快照写回去会让对象与 Helm 状态分叉，
   下次升级即被覆盖。回退需要单独评估。
 - 不做"谁改的"。该问题的结论已在 `docs/PLAN.md` 记录：写入时打标不覆盖真实变更路径。
+
+### 后续可选增强（不在本条范围）
+
+Helm 的 release secret（`sh.helm.release.v1.<release>.v<N>`）里存有该次发布的完整 manifest 与
+时间。把对象内容与各次 release 的 manifest 做比对，可以判定"这次变更对应哪一次 Helm 发布"，
+从而把「Helm 管理」细化为「Helm release wes-server v12」。这需要额外的比对逻辑，本轮不做。
 
 ## 风险
 
