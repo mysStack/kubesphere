@@ -415,3 +415,38 @@ Console 分支 `feature/app-config-reference`，本阶段前端提交到 `65ae7b
 - [ ] 更新本文件的完成项、未完成项、限制和新构想。
 - [ ] 前后端同名发布线分别合并回各自 `master`。
 - [ ] 下一版本从更新后的 `master` 创建新的 `release-X.Y.Z` 发布开发线。
+
+## 评估结论：「最后更新人」该不该推广到普通资源（2026-10-08）——暂不做
+
+起因：想在资源详情页（Deployment / ConfigMap …）左侧「属性」栏看到「最后更新人」，与
+应用详情页那一行对齐。评估后决定**暂不做**，理由与证据记录如下，避免后来者重复走一遍。
+
+### 实测证据（不是推测）
+
+1. 集群里带 `annotations.revisions`（KubeSphere 记录"通过控制台编辑"的痕迹）的资源：
+   deployments / statefulsets / daemonsets / services / ingresses / configmaps / secrets / hpa
+   **全部为 0** —— 也就是说**没有人通过控制台编辑过这些资源**。
+2. 带 `kubesphere.io/creator` 的资源有 86 个，但全部是控制台**创建**时盖的章，与编辑无关。
+3. 手工在控制台改一次 `dev-wes/wes-v2-server` 的描述（metadata-only，实测未触发滚动）：
+   `generation` 36→37，但 `creator` 与 `last-updater` **都没有被写入** —— 控制台的更新路径
+   不盖这两个章。
+4. 审计能力现状：k3s 的 apiserver **未开启 audit**（节点参数里没有任何 audit 相关）；
+   没有 ES / Loki / VictoriaLogs 在跑；但 `auditingevents.auditing.kubesphere.io` API **存在**
+   （匿名请求返回 403，即端点存在、需鉴权）—— 平台有审计的"查询侧"，缺"数据源"。
+
+### 结论
+
+- **注解方案在此环境无效**：它只能给"经过控制台 API 的编辑"盖章，而本集群的变更全部走
+  Helm / kubectl / CI，绕过控制台，所以这一行会**长期为空**。加这一行等于加一个永远为空的字段。
+- **要真正回答"这个配置是谁在什么时候改的"，只有审计能做到**，因为它是唯一覆盖全部变更路径的
+  来源。
+- 因此决定**暂不做**。若将来要做，按成本排序的最小可行路径是：
+  1. 给 k3s 开 apiserver audit（`--kube-apiserver-arg=audit-log-path` + 一份只记写操作的
+     audit policy），日志落盘并配轮转；
+  2. 平台化：审计日志进 VictoriaLogs / Loki，再接上 KubeSphere 的 `auditingevents` 查询 API，
+     让审计页面有数据。
+
+### 已经存在的相关实现（保留，不再扩展）
+
+应用详情页的「最后更新人」已实现并线上验证（创建只写创建人、更新才写最后更新人）。但**应用本身
+建完基本不动**，这一行的实际价值很低，因此**不向其它资源类型扩展**。
